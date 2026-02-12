@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Uber Personalized Prices Aggregator",
+  "version": "2.0",
+  "permissions": ["storage", "tabs", "alarms", "notifications", "cookies"],
+  "host_permissions": ["https://m.uber.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://m.uber.com/*"],
+      "js": ["interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://m.uber.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

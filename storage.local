@@ -1,0 +1,12 @@
+chrome.storage.local.get('results', ({ results }) => {
+  const csv = results.map(r => 
+    r.rides.map(ride => `${r.timestamp},${r.pickup},${r.dropoff},${ride.type},${ride.price},${ride.eta}`).join('\n')
+  ).join('\n');
+
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'uber-results.csv';
+  a.click();
+});
