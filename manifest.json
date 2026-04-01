@@ -7,7 +7,8 @@
     "https://m.uber.com/*",
     "https://riders.uber.com/*",
     "https://myprivacy.uber.com/*",
-    "https://sywq97zasl.execute-api.us-east-2.amazonaws.com/*"
+    "https://sywq97zasl.execute-api.us-east-2.amazonaws.com/*",
+    "https://rideshare-study.s3.us-east-2.amazonaws.com/*"
   ],
   "icons": {
     "16": "Icon.png",

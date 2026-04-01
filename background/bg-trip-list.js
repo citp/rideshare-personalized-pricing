@@ -1,4 +1,5 @@
 const BASE_TRIPS = [
+  { etTime: "2026-04-01T19:31:23-04:00", label: "Denver Downtown → DIA", pickupLat: 39.7392, pickupLng: -104.9903, dropoffLat: 39.8561, dropoffLng: -104.6737 },
   { etTime: "2026-04-02T07:05:23-04:00", label: "Denver Downtown → DIA", pickupLat: 39.7392, pickupLng: -104.9903, dropoffLat: 39.8561, dropoffLng: -104.6737 },
   { etTime: "2026-04-02T08:48:30-04:00", label: "NYC Midtown → JFK", pickupLat: 40.7549, pickupLng: -73.984, dropoffLat: 40.6413, dropoffLng: -73.7781 },
   { etTime: "2026-04-02T09:03:43-04:00", label: "SF Union Square → SFO", pickupLat: 37.788, pickupLng: -122.4075, dropoffLat: 37.6213, dropoffLng: -122.379 },
