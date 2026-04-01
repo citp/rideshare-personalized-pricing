@@ -91,3 +91,16 @@ function sendTripHistoryFailureNotification(verification) {
     priority: 1,
   });
 }
+
+function sendSearchReliabilityWarningNotification(health) {
+  const failed = health?.failedCount ?? 0;
+  const total = health?.sampleSize ?? 0;
+  const percent = Math.round((health?.failureRate ?? 0) * 100);
+  chrome.notifications.create({
+    type: "basic",
+    iconUrl: "icon.png",
+    title: "Search reliability warning",
+    message: `High failure rate: ${failed}/${total} recent searches failed (${percent}%). Open extension popup for details.`,
+    priority: 2,
+  });
+}

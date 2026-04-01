@@ -100,12 +100,46 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+let verificationWindowId = null;
+
+async function ensureVerificationWindow() {
+  if (typeof verificationWindowId === "number") {
+    try {
+      await chrome.windows.get(verificationWindowId);
+      return verificationWindowId;
+    } catch (_) {
+      verificationWindowId = null;
+    }
+  }
+
+  const win = await chrome.windows.create({
+    url: "about:blank",
+    focused: false,
+    state: "minimized",
+  });
+  verificationWindowId = win?.id ?? null;
+  if (typeof verificationWindowId !== "number") {
+    throw new Error("Could not create dedicated verification window");
+  }
+  return verificationWindowId;
+}
+
 async function extractTripsFromBackgroundTab(url) {
-  const tab = await chrome.tabs.create({ url, active: false });
-  const tabId = tab.id;
+  let tabId = null;
   const timeoutMs = 20000;
 
   try {
+    const windowId = await ensureVerificationWindow();
+    const tab = await chrome.tabs.create({
+      windowId,
+      url,
+      active: false,
+    });
+    tabId = tab?.id ?? null;
+    if (typeof tabId !== "number") {
+      throw new Error(`Could not create background verification tab for ${url}`);
+    }
+
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         chrome.tabs.onUpdated.removeListener(onUpdated);
@@ -138,7 +172,7 @@ async function extractTripsFromBackgroundTab(url) {
         if (response?.ok && Array.isArray(response.timestamps)) {
           return {
             ok: true,
-            finalUrl: response.finalUrl || tab.url || url,
+            finalUrl: response.finalUrl || currentUrl || url,
             httpStatus: response.httpStatus || 200,
             timestamps: response.timestamps,
             tripLinks: Array.isArray(response.tripLinks) ? response.tripLinks : [],
@@ -162,6 +196,14 @@ async function extractTripsFromBackgroundTab(url) {
     if (typeof tabId === "number") {
       try {
         await chrome.tabs.remove(tabId);
+      } catch (_) {}
+    }
+    if (typeof verificationWindowId === "number") {
+      try {
+        await chrome.windows.get(verificationWindowId);
+      } catch (_) {}
+      try {
+        await chrome.windows.update(verificationWindowId, { focused: false, state: "minimized" });
       } catch (_) {}
     }
   }

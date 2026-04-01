@@ -22,13 +22,25 @@
       .current-row { background: #ebf8ff; }
       .login-warning { color: #c53030; font-weight: bold; background: #fff5f5; border: 1px solid #fc8181; padding: 8px; border-radius: 4px; }
       .note { font-size: 11px; color: #666; margin-top: 8px; }
+      #export-timing-btn { background: #4a5568; color: white; }
+      #export-timing-btn:hover { background: #2d3748; }
+      .critical-warning { color: #742a2a; font-weight: 700; background: #fff5f5; border: 2px solid #e53e3e; border-radius: 6px; padding: 10px; margin: 8px 0; font-size: 13px; }
+      .footer-links { margin-top: 10px; font-size: 12px; color: #4a5568; display: flex; gap: 10px; justify-content: center; }
+      .footer-links a { color: #2b6cb0; text-decoration: none; }
+      .footer-links a:hover { text-decoration: underline; }
     </style>
   </head>
   <body>
     <h3>Uber Personalized Prices Aggregator</h3>
     <div id="status">Loading…</div>
+    <div id="failure-alert" class="critical-warning" style="display:none;"></div>
+    <button id="export-timing-btn">Export timing CSV</button>
     <button id="download-btn" disabled>Download CSV</button>
     <div id="trip-list"></div>
+    <div class="footer-links">
+      <a href="https://docs.google.com/document/d/1euXImZFZVllWo5k3l_yFOm9uIhvj4cpb1b3E96P29rk/edit?tab=t.0#heading=h.32xjbgaj5b8p" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
+      <a href="https://github.com/citp/rideshare-personalized-pricing" target="_blank" rel="noopener noreferrer">Source Code</a>
+    </div>
     <script src="popup.js"></script>
   </body>
 </html>

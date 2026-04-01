@@ -12,6 +12,28 @@ function formatLocalDateTime(ms) {
   return `${dateLabel} ${timeLabel}`;
 }
 
+function formatLocalTimeWithDayLabel(ms) {
+  const date = new Date(ms);
+  const now = new Date();
+  const dateOnly = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const todayOnly = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  let dayLabel = "on " + date.toLocaleDateString([], { month: "short", day: "numeric" });
+  if (dateOnly === todayOnly) {
+    dayLabel = "today";
+  } else if (dateOnly === todayOnly + dayMs) {
+    dayLabel = "tomorrow";
+  }
+
+  const timeLabel = date.toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+  return `${timeLabel} ${dayLabel}`;
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   // Fetch the schedule once on popup open
   chrome.runtime.sendMessage({ type: "GET_TRIP_SCHEDULE" }, (schedule) => {
@@ -25,6 +47,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const downloadBtn = document.getElementById("download-btn");
   const statusDiv = document.getElementById("status");
   const tripListDiv = document.getElementById("trip-list");
+  const failureAlertDiv = document.getElementById("failure-alert");
+  const exportTimingBtn = document.getElementById("export-timing-btn");
   const verificationNoteDiv = document.createElement("div");
   verificationNoteDiv.id = "verification-note";
   verificationNoteDiv.style.cssText = "margin:8px 0 10px;font-size:12px;color:#4a5568;background:#f7fafc;border:1px solid #e2e8f0;border-radius:4px;padding:6px 8px;white-space:pre-wrap;";
@@ -54,13 +78,63 @@ document.addEventListener("DOMContentLoaded", () => {
         profileVerification,
         tripHistoryVerificationFailed,
         tripHistoryVerification,
+        searchHealth,
       } = state;
       const hasResults = results && results.length > 0;
       const successCount = (tripStatuses || []).filter(s => s === "success").length;
       const errorCount = (tripStatuses || []).filter(s => s === "no_data" || s === "no_prices").length;
+      const missedLateCount = (tripStatuses || []).filter(s => s === "missed_late").length;
       const skippedCount = (tripStatuses || []).filter(s => s === "skipped").length;
       const pendingCount = (tripStatuses || []).filter(s => s === "pending").length;
       const isDone = !running && !loginRequired && pendingCount === 0;
+      const hasVerificationResult =
+        !!profileVerification ||
+        !!tripHistoryVerification ||
+        !!profileVerificationFailed ||
+        !!tripHistoryVerificationFailed;
+      const verificationInProgress =
+        !prolificIdRequired &&
+        !screenedOut &&
+        !hasVerificationResult;
+      const verificationCompleted =
+        !prolificIdRequired &&
+        !screenedOut &&
+        !!profileVerification?.passed &&
+        !!tripHistoryVerification?.passed;
+      const canShowNextRide =
+        !prolificIdRequired &&
+        !screenedOut &&
+        !!profileVerification?.passed &&
+        !!tripHistoryVerification?.passed;
+      const loginStatusLine = `Uber login status: ${loginRequired ? "not logged in" : "logged in"}`;
+      const chromeVerificationStatus = prolificIdRequired
+        ? "in-progress"
+        : profileVerificationFailed
+          ? "failed"
+          : profileVerification?.passed
+            ? "success"
+            : "in-progress";
+      const uberHistoryVerificationStatus = prolificIdRequired
+        ? "in-progress"
+        : tripHistoryVerificationFailed
+          ? "failed"
+          : tripHistoryVerification?.passed
+            ? "success"
+            : "in-progress";
+      const verificationLines = [
+        loginStatusLine,
+        `Chrome activity verification: ${chromeVerificationStatus}`,
+        `Uber history verification: ${uberHistoryVerificationStatus}`,
+      ];
+      if (searchHealth?.isFailing) {
+        const pct = Math.round((searchHealth.failureRate || 0) * 100);
+        failureAlertDiv.style.display = "block";
+        failureAlertDiv.textContent = `High failure rate detected: ${searchHealth.failedCount}/${searchHealth.sampleSize} of the last ${searchHealth.sampleSize} searches failed (${pct}%).`;
+      } else {
+        failureAlertDiv.style.display = "none";
+        failureAlertDiv.textContent = "";
+      }
+
       const tripSummaries = tripHistoryVerification?.profileSummaries || [];
       const nonOkSummaries = tripSummaries.filter((s) => s && s.fetched && s.httpOk === false);
       const fetchFailures = tripSummaries.filter((s) => s && s.fetched === false);
@@ -123,11 +197,11 @@ document.addEventListener("DOMContentLoaded", () => {
         statusDiv.className = "login-warning";
         if (existingBtn) existingBtn.remove();
       } else if (prolificIdRequired) {
-        statusDiv.textContent = "⚠ Prolific ID required. Enter it in the opened setup tab.";
+        statusDiv.textContent = `⚠ Prolific ID required. Enter it in the opened setup tab.\n${verificationLines.join("\n")}`;
         statusDiv.className = "login-warning";
         if (existingBtn) existingBtn.remove();
       } else if (loginRequired) {
-        statusDiv.textContent = "⚠ Not logged in.";
+        statusDiv.textContent = `⚠ Not logged in.\n${verificationLines.join("\n")}`;
         statusDiv.className = "login-warning";
         if (!existingBtn) {
           const loginBtn = document.createElement("button");
@@ -146,7 +220,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const activeDays = profileVerification?.activeDays ?? 0;
         const requiredActiveDays = profileVerification?.requiredActiveDays ?? 5;
         const minPerActiveDay = profileVerification?.minActionsPerActiveDay ?? 120;
-        statusDiv.textContent = `⚠ Profile check failed: ${activeDays}/${requiredActiveDays} active days (>=${minPerActiveDay}/day) and ${totalLocal}/${minActions} local actions in last ${lookbackDays} days.`;
+        statusDiv.textContent = `⚠ Profile check failed: ${activeDays}/${requiredActiveDays} active days (>=${minPerActiveDay}/day) and ${totalLocal}/${minActions} local actions in last ${lookbackDays} days.\n${verificationLines.join("\n")}`;
         statusDiv.className = "login-warning";
         if (existingBtn) existingBtn.remove();
       } else if (tripHistoryVerificationFailed) {
@@ -163,7 +237,7 @@ document.addEventListener("DOMContentLoaded", () => {
           const statuses = nonOk.map((s) => `${s.profile}:${s.httpStatus}`).join(", ");
           reason = ` Trips pages returned non-OK status (${statuses}).`;
         }
-        statusDiv.textContent = `⚠ Uber trips check failed: found ${totalTrips}/${minTrips} trips since ${cutoffDate}.${reason}`;
+        statusDiv.textContent = `⚠ Uber trips check failed: found ${totalTrips}/${minTrips} trips since ${cutoffDate}.${reason}\n${verificationLines.join("\n")}`;
         statusDiv.className = "login-warning";
         if (existingBtn) existingBtn.remove();
       } else if (running) {
@@ -172,16 +246,27 @@ document.addEventListener("DOMContentLoaded", () => {
         const searchingIdx = (tripStatuses || []).indexOf("searching");
         const nextPendingIdx = searchingIdx >= 0 ? searchingIdx : (tripStatuses || []).indexOf("pending");
         const nextTrip = nextPendingIdx >= 0 ? TRIP_SCHEDULE[nextPendingIdx] : null;
-        const nextLabel = nextTrip ? `next: ${formatLocalDateTime(nextTrip.runAtMs)} (local)` : "waiting…";
-        statusDiv.textContent = `Running — ${nextLabel} | ${successCount} captured, ${pendingCount} remaining`;
+        const nextLabel = canShowNextRide
+          ? (nextTrip ? `Next ride search will happen at ${formatLocalTimeWithDayLabel(nextTrip.runAtMs)}` : "Waiting for next scheduled ride search")
+          : "";
+        const nextSentence = nextLabel ? `\n${nextLabel}.` : "";
+        statusDiv.textContent = `${verificationLines.join("\n")}${nextSentence}\nRunning searches: ${successCount} captured, ${pendingCount} remaining.`;
         statusDiv.className = "";
       } else if (isDone) {
         if (existingBtn) existingBtn.remove();
-        statusDiv.textContent = `Done. ${successCount} captured, ${errorCount} errors, ${skippedCount} skipped.`;
+        statusDiv.textContent = `${verificationLines.join("\n")}\nDone: ${successCount} captured, ${errorCount} errors, ${missedLateCount} missed late, ${skippedCount} skipped.`;
         statusDiv.className = "done";
       } else {
         if (existingBtn) existingBtn.remove();
-        statusDiv.textContent = `${successCount} captured so far.`;
+        const nextPendingIdx = (tripStatuses || []).indexOf("pending");
+        const nextTrip = nextPendingIdx >= 0 ? TRIP_SCHEDULE[nextPendingIdx] : null;
+        const nextRideLabel = canShowNextRide
+          ? (nextTrip ? ` Next ride search will happen at ${formatLocalTimeWithDayLabel(nextTrip.runAtMs)}.` : "")
+          : "";
+        const summaryLine = verificationCompleted
+          ? "Verification completed."
+          : `${successCount} captured so far.`;
+        statusDiv.textContent = `${verificationLines.join("\n")}\n${summaryLine}${nextRideLabel}`;
         statusDiv.className = "";
       }
 
@@ -246,6 +331,10 @@ document.addEventListener("DOMContentLoaded", () => {
           statusText = "–";
           cssClass = "skipped";
           break;
+        case "missed_late":
+          statusText = "⏱ missed";
+          cssClass = "error";
+          break;
         default:
           statusText = "";
           cssClass = "pending";
@@ -305,6 +394,43 @@ document.addEventListener("DOMContentLoaded", () => {
       a.download = `uber_prices_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.csv`;
       a.click();
       URL.revokeObjectURL(url);
+    });
+  });
+
+  function downloadCsv(rows, filenamePrefix) {
+    if (!rows || rows.length === 0) {
+      statusDiv.textContent = "No data to download.";
+      return;
+    }
+    const headers = Object.keys(rows[0]);
+    const csvLines = [headers.join(",")];
+    for (const row of rows) {
+      const values = headers.map((h) => {
+        let v = row[h] ?? "";
+        v = String(v).replace(/"/g, '""');
+        if (/[,"\n]/.test(v)) v = `"${v}"`;
+        return v;
+      });
+      csvLines.push(values.join(","));
+    }
+    const csv = csvLines.join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${filenamePrefix}_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  exportTimingBtn.addEventListener("click", () => {
+    chrome.runtime.sendMessage({ type: "GET_TIMING_LOG" }, (resp) => {
+      if (chrome.runtime.lastError || !resp?.ok) {
+        statusDiv.textContent = `Could not export timing log: ${chrome.runtime.lastError?.message || resp?.error || "unknown error"}`;
+        statusDiv.className = "login-warning";
+        return;
+      }
+      downloadCsv(resp.rows, "uber_timing");
     });
   });
 

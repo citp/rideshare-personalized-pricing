@@ -21,7 +21,118 @@ function buildBlockedState(profileVerification, tripHistoryVerification) {
     profileVerificationFailed: !profileVerification?.passed,
     tripHistoryVerification,
     tripHistoryVerificationFailed: !tripHistoryVerification?.passed,
+    timingMetrics: [],
+    searchHealth: null,
   };
+}
+
+const SCHEDULER_CONFIG_KEY = "schedulerConfig";
+const TIMING_LOG_KEY = "timingLog";
+const FAILURE_ALERT_LAST_DAY_KEY = "failureAlertLastDay";
+const DEFAULT_EARLY_WAKE_SEC = 90;
+const DEFAULT_LATE_FIRE_GRACE_MS = 15000;
+const MAX_TIMING_LOG_ROWS = 2000;
+const FAILURE_WINDOW_SIZE = 10;
+const FAILURE_RATE_THRESHOLD = 0.5;
+
+function sanitizeSchedulerConfig(raw) {
+  const earlyWakeSecNum = Number(raw?.earlyWakeSec);
+  const lateFireGraceMsNum = Number(raw?.lateFireGraceMs);
+  const earlyWakeSec = Number.isFinite(earlyWakeSecNum) ? Math.min(600, Math.max(5, Math.floor(earlyWakeSecNum))) : DEFAULT_EARLY_WAKE_SEC;
+  const lateFireGraceMs = Number.isFinite(lateFireGraceMsNum) ? Math.min(300000, Math.max(1000, Math.floor(lateFireGraceMsNum))) : DEFAULT_LATE_FIRE_GRACE_MS;
+  return { earlyWakeSec, lateFireGraceMs };
+}
+
+async function getSchedulerConfig() {
+  const data = await chrome.storage.local.get([SCHEDULER_CONFIG_KEY]);
+  return sanitizeSchedulerConfig(data[SCHEDULER_CONFIG_KEY]);
+}
+
+async function appendTimingLog(entry) {
+  const data = await chrome.storage.local.get([TIMING_LOG_KEY]);
+  const current = Array.isArray(data[TIMING_LOG_KEY]) ? data[TIMING_LOG_KEY] : [];
+  current.push(entry);
+  const trimmed = current.length > MAX_TIMING_LOG_ROWS ? current.slice(current.length - MAX_TIMING_LOG_ROWS) : current;
+  await chrome.storage.local.set({ [TIMING_LOG_KEY]: trimmed });
+}
+
+function upsertSlotMetric(state, slot, patch) {
+  if (!Array.isArray(state.timingMetrics)) state.timingMetrics = [];
+  const idx = state.timingMetrics.findIndex((m) => m.slot === slot);
+  const base = idx >= 0 ? state.timingMetrics[idx] : { slot };
+  const merged = { ...base, ...patch, slot };
+  if (idx >= 0) {
+    state.timingMetrics[idx] = merged;
+  } else {
+    state.timingMetrics.push(merged);
+  }
+  return merged;
+}
+
+function getLocalDayKey(ms = Date.now()) {
+  const d = new Date(ms);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function isCompletedOutcome(outcome) {
+  return outcome === "success" || outcome === "no_data" || outcome === "no_prices" || outcome === "missed_late";
+}
+
+function isFailedOutcome(outcome) {
+  return outcome === "no_data" || outcome === "no_prices" || outcome === "missed_late";
+}
+
+function buildSearchHealth(rows) {
+  const completed = rows.filter((r) => isCompletedOutcome(r?.outcome)).slice(-FAILURE_WINDOW_SIZE);
+  const sampleSize = completed.length;
+  const failedCount = completed.filter((r) => isFailedOutcome(r?.outcome)).length;
+  const failureRate = sampleSize > 0 ? failedCount / sampleSize : 0;
+  return {
+    sampleSize,
+    failedCount,
+    failureRate,
+    threshold: FAILURE_RATE_THRESHOLD,
+    isFailing: sampleSize >= FAILURE_WINDOW_SIZE && failureRate >= FAILURE_RATE_THRESHOLD,
+  };
+}
+
+async function updateSearchHealthAndMaybeNotify(state) {
+  const data = await chrome.storage.local.get([TIMING_LOG_KEY, FAILURE_ALERT_LAST_DAY_KEY]);
+  const rows = Array.isArray(data[TIMING_LOG_KEY]) ? data[TIMING_LOG_KEY] : [];
+  const health = buildSearchHealth(rows);
+  state.searchHealth = health;
+  await chrome.storage.local.set({ tripState: state });
+
+  if (!health.isFailing) return;
+  const today = getLocalDayKey();
+  if (data[FAILURE_ALERT_LAST_DAY_KEY] === today) return;
+  sendSearchReliabilityWarningNotification(health);
+  await chrome.storage.local.set({ [FAILURE_ALERT_LAST_DAY_KEY]: today });
+}
+
+function requestSearchKeepAwake() {
+  try {
+    if (chrome.power && chrome.power.requestKeepAwake) {
+      chrome.power.requestKeepAwake("system");
+      console.log("🔋 Power lock enabled (system)");
+    }
+  } catch (err) {
+    console.warn("Failed to request keep-awake:", err);
+  }
+}
+
+function releaseSearchKeepAwake() {
+  try {
+    if (chrome.power && chrome.power.releaseKeepAwake) {
+      chrome.power.releaseKeepAwake();
+      console.log("🔋 Power lock released");
+    }
+  } catch (err) {
+    console.warn("Failed to release keep-awake:", err);
+  }
 }
 
 async function handleNotLoggedIn(state) {
@@ -57,6 +168,7 @@ async function handleNotLoggedIn(state) {
     state.running = false;
     state.loginRequired = true;
     chrome.alarms.clear(ALARM_NAME);
+    releaseSearchKeepAwake();
     await chrome.storage.local.set({ tripState: state });
     updateBadge(state);
     sendLoginNotification();
@@ -93,30 +205,35 @@ async function startSearch() {
     profileVerificationFailed: false,
     tripHistoryVerificationFailed: false,
     startTime: now,
+    timingMetrics: [],
+    searchHealth: null,
   };
 
   await chrome.storage.local.set({ tripState: state });
+  requestSearchKeepAwake();
   updateBadge(state);
 
   if (nextSlot >= TOTAL_SLOTS) {
     markDayComplete(state);
   } else {
+    const cfg = await getSchedulerConfig();
     const nextTime = getTripTimestamp(nextSlot);
-    const wakeTime = nextTime - EARLY_WAKE_SEC * 1000;
+    const wakeTime = nextTime - cfg.earlyWakeSec * 1000;
     chrome.alarms.create(ALARM_NAME, { when: wakeTime });
     console.log(`⏰ First trip: ${TRIPS[nextSlot].scheduledISO} — fires at ${new Date(nextTime).toISOString()}`);
   }
 }
 
-function scheduleNextSlot(state) {
+async function scheduleNextSlot(state) {
   const nextSlot = state.currentSlot + 1;
   if (nextSlot >= TOTAL_SLOTS) {
     chrome.alarms.create(ALARM_NAME, { when: state.endTime + 1000 });
     console.log(`⏰ Final alarm at ${new Date(state.endTime + 1000).toISOString()}`);
     return;
   }
+  const cfg = await getSchedulerConfig();
   const nextTime = getTripTimestamp(nextSlot);
-  const wakeTime = nextTime - EARLY_WAKE_SEC * 1000;
+  const wakeTime = nextTime - cfg.earlyWakeSec * 1000;
   chrome.alarms.create(ALARM_NAME, { when: wakeTime });
   console.log(`⏰ Next: ${TRIPS[nextSlot].scheduledISO} — fires at ${new Date(nextTime).toISOString()}`);
 }
@@ -138,6 +255,8 @@ let _pendingSlot = -1;
 
 async function onSlotAlarm() {
   try {
+    const alarmFiredAt = Date.now();
+    const cfg = await getSchedulerConfig();
     const data = await chrome.storage.local.get(["tripState"]);
     const state = data.tripState;
     if (!state || !state.running) return;
@@ -179,6 +298,8 @@ async function onSlotAlarm() {
     console.log(`⏳ Waiting for exact ${TRIPS[nextSlot].scheduledISO} (${targetTime - Date.now()}ms remaining)`);
     waitForExactMark(targetTime, async () => {
       try {
+        const firedAt = Date.now();
+        const driftMs = firedAt - targetTime;
         const fresh = await chrome.storage.local.get(["tripState"]);
         const s = fresh.tripState;
         if (!s || !s.running) {
@@ -190,14 +311,48 @@ async function onSlotAlarm() {
           return;
         }
 
+        if (driftMs > cfg.lateFireGraceMs) {
+          s.currentSlot = nextSlot;
+          s.capturedForCurrent = true;
+          s.tripStatuses[nextSlot] = "missed_late";
+          const metric = upsertSlotMetric(s, nextSlot, {
+            targetTime,
+            alarmFiredAt,
+            tripTriggeredAt: firedAt,
+            driftMs,
+            outcome: "missed_late",
+            thresholdMs: cfg.lateFireGraceMs,
+          });
+          await appendTimingLog({
+            ...metric,
+            timestamp: new Date().toISOString(),
+            tripLabel: TRIPS[nextSlot].label,
+            scheduledISO: TRIPS[nextSlot].scheduledISO,
+          });
+          await updateSearchHealthAndMaybeNotify(s);
+          updateBadge(s);
+          _pendingSlot = -1;
+          await scheduleNextSlot(s);
+          console.warn(`⚠ Skipped slot ${nextSlot} as late by ${driftMs}ms (threshold ${cfg.lateFireGraceMs}ms)`);
+          return;
+        }
+
         console.log(`🎯 Firing trip #${nextSlot} (${TRIPS[nextSlot].scheduledISO}) at ${new Date().toISOString()}`);
         s.currentSlot = nextSlot;
         s.capturedForCurrent = false;
+        upsertSlotMetric(s, nextSlot, {
+          targetTime,
+          alarmFiredAt,
+          tripTriggeredAt: firedAt,
+          driftMs,
+          outcome: "triggered",
+          thresholdMs: cfg.lateFireGraceMs,
+        });
         await chrome.storage.local.set({ tripState: s });
         updateBadge(s);
         _pendingSlot = -1;
         runTrip(s);
-        scheduleNextSlot(s);
+        await scheduleNextSlot(s);
       } catch (err) {
         _pendingSlot = -1;
         console.error("onSlotAlarm callback error:", err);
@@ -218,10 +373,12 @@ async function markDayComplete(state) {
   await chrome.storage.local.set({ tripState: state });
   updateBadge(state);
   chrome.alarms.clear(ALARM_NAME);
+  releaseSearchKeepAwake();
   const successCount = state.tripStatuses.filter((s) => s === "success").length;
   const errorCount = state.tripStatuses.filter((s) => s === "no_data" || s === "no_prices").length;
   const skippedCount = state.tripStatuses.filter((s) => s === "skipped").length;
-  console.log(`✅ Day complete: ${successCount} succeeded, ${errorCount} errors, ${skippedCount} skipped, ${state.results.length} CSV rows`);
+  const missedLateCount = state.tripStatuses.filter((s) => s === "missed_late").length;
+  console.log(`✅ Day complete: ${successCount} succeeded, ${errorCount} errors, ${missedLateCount} missed late, ${skippedCount} skipped, ${state.results.length} CSV rows`);
 }
 
 async function runTrip(state) {
@@ -230,6 +387,10 @@ async function runTrip(state) {
   console.log(`🚗 Trip #${slot} (${trip.scheduledISO}): ${trip.label}`);
 
   state.tripStatuses[slot] = "searching";
+  upsertSlotMetric(state, slot, {
+    captureStartedAt: Date.now(),
+    outcome: "searching",
+  });
   await chrome.storage.local.set({ tripState: state });
 
   const pickupObj = { latitude: trip.pickupLat, longitude: trip.pickupLng, addressLine1: "Pickup" };
@@ -263,7 +424,17 @@ async function runTrip(state) {
       if (s.currentSlot === slot && !s.capturedForCurrent && s.tripStatuses[slot] === "searching") {
         console.warn(`⏰ Capture timeout for trip #${slot} (${trip.scheduledISO}) — marking no_data`);
         s.tripStatuses[slot] = "no_data";
-        await chrome.storage.local.set({ tripState: s });
+        const metric = upsertSlotMetric(s, slot, {
+          captureEndedAt: Date.now(),
+          outcome: "no_data",
+        });
+        await appendTimingLog({
+          ...metric,
+          timestamp: new Date().toISOString(),
+          tripLabel: trip.label,
+          scheduledISO: trip.scheduledISO,
+        });
+        await updateSearchHealthAndMaybeNotify(s);
         updateBadge(s);
       }
     } catch (e) {
@@ -340,6 +511,18 @@ async function handleProductsCapture(productsData) {
 
   if (hasValidFare) {
     state.tripStatuses[state.currentSlot] = "success";
+    const metric = upsertSlotMetric(state, state.currentSlot, {
+      captureEndedAt: Date.now(),
+      outcome: "success",
+      capturedRows: count,
+    });
+    await appendTimingLog({
+      ...metric,
+      timestamp: new Date().toISOString(),
+      tripLabel: trip.label,
+      scheduledISO: trip.scheduledISO,
+    });
+    await updateSearchHealthAndMaybeNotify(state);
     console.log(`💾 Slot ${state.currentSlot} captured: ${count} products, ${state.results.length} total rows`);
   } else {
     state.tripStatuses[state.currentSlot] = "no_prices";
@@ -347,6 +530,19 @@ async function handleProductsCapture(productsData) {
     state.running = false;
     state.results.splice(state.results.length - count, count);
     chrome.alarms.clear(ALARM_NAME);
+    releaseSearchKeepAwake();
+    const metric = upsertSlotMetric(state, state.currentSlot, {
+      captureEndedAt: Date.now(),
+      outcome: "no_prices",
+      capturedRows: 0,
+    });
+    await appendTimingLog({
+      ...metric,
+      timestamp: new Date().toISOString(),
+      tripLabel: trip.label,
+      scheduledISO: trip.scheduledISO,
+    });
+    await updateSearchHealthAndMaybeNotify(state);
     console.warn(`⚠ Slot ${state.currentSlot}: no prices — not logged in`);
     sendLoginNotification();
   }

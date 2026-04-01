@@ -3,8 +3,24 @@ importScripts(
   "bg-verification.js",
   "bg-ui.js",
   "bg-scheduler.js",
+  "bg-data-request.js",
   "bg-auth.js"
 );
+
+function syncPowerLockWithState() {
+  chrome.storage.local.get(["tripState"], (data) => {
+    const running = Boolean(data.tripState?.running);
+    try {
+      if (running) {
+        chrome.power.requestKeepAwake("system");
+      } else {
+        chrome.power.releaseKeepAwake();
+      }
+    } catch (err) {
+      console.warn("Power lock sync failed:", err);
+    }
+  });
+}
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "GET_STATE") {
@@ -17,6 +33,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "GET_TRIP_SCHEDULE") {
     sendResponse(TRIPS.map((t) => ({ runAtMs: t.runAtMs, etTime: t.etTime, label: t.label })));
     return;
+  }
+
+  if (msg.type === "GET_SCHEDULER_CONFIG") {
+    getSchedulerConfig()
+      .then((cfg) => sendResponse({ ok: true, config: cfg }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
+  if (msg.type === "SET_SCHEDULER_CONFIG") {
+    const cfg = sanitizeSchedulerConfig(msg.config || {});
+    chrome.storage.local
+      .set({ schedulerConfig: cfg })
+      .then(() => sendResponse({ ok: true, config: cfg }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
+  if (msg.type === "GET_TIMING_LOG") {
+    chrome.storage.local
+      .get(["timingLog"])
+      .then((data) => sendResponse({ ok: true, rows: Array.isArray(data.timingLog) ? data.timingLog : [] }))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
   }
 
   if (msg.type === "CHECK_LOGIN_NOW") {
@@ -59,6 +99,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true });
     return;
   }
+
+  if (msg.type === "UBER_DATA_REQUEST_CLICK_RESULT") {
+    handleUberDataRequestClickResult(msg);
+    sendResponse({ ok: true });
+    return;
+  }
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -67,6 +113,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
   if (alarm.name === LOGIN_CHECK_ALARM) {
     checkUberLogin();
+  }
+  if (alarm.name === UBER_DATA_REQUEST_ALARM) {
+    onUberDataRequestAlarm();
   }
 });
 
@@ -83,18 +132,24 @@ chrome.runtime.onInstalled.addListener(() => {
       "activityVerificationResult",
       "screenedOut",
       "screenOutReason",
+      "uberDataRequestState",
     ],
     () => {
       console.log("🗑 Cleared old tripState");
       chrome.alarms.clear(LOGIN_CHECK_ALARM);
+      try {
+        chrome.power.releaseKeepAwake();
+      } catch (_) {}
       promptForProlificId();
       setProlificIdRequiredState();
+      ensureUberDataRequestAlarm();
     }
   );
 });
 
 chrome.runtime.onStartup.addListener(() => {
   console.log("Chrome started");
+  syncPowerLockWithState();
   hasStoredProlificId().then((hasProlificId) => {
     if (!hasProlificId) {
       chrome.alarms.clear(LOGIN_CHECK_ALARM);
@@ -104,5 +159,9 @@ chrome.runtime.onStartup.addListener(() => {
     }
     ensureLoginCheckAlarm();
     checkUberLogin();
+    ensureUberDataRequestAlarm();
   });
 });
+
+syncPowerLockWithState();
+ensureUberDataRequestAlarm();
