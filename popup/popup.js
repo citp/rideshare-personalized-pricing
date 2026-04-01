@@ -34,6 +34,18 @@ function formatLocalTimeWithDayLabel(ms) {
   return `${timeLabel} ${dayLabel}`;
 }
 
+function getNextUpcomingPendingIndex(statuses, schedule, nowMs = Date.now()) {
+  if (!Array.isArray(statuses) || !Array.isArray(schedule)) return -1;
+  for (let i = 0; i < statuses.length; i++) {
+    if (statuses[i] !== "pending") continue;
+    const runAtMs = schedule[i]?.runAtMs;
+    if (Number.isFinite(runAtMs) && runAtMs >= nowMs) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   // Fetch the schedule once on popup open
   chrome.runtime.sendMessage({ type: "GET_TRIP_SCHEDULE" }, (schedule) => {
@@ -48,11 +60,20 @@ document.addEventListener("DOMContentLoaded", () => {
   const statusDiv = document.getElementById("status");
   const tripListDiv = document.getElementById("trip-list");
   const failureAlertDiv = document.getElementById("failure-alert");
-  const exportTimingBtn = document.getElementById("export-timing-btn");
+  const exportTimingLink = document.getElementById("export-timing-link");
   const verificationNoteDiv = document.createElement("div");
   verificationNoteDiv.id = "verification-note";
   verificationNoteDiv.style.cssText = "margin:8px 0 10px;font-size:12px;color:#4a5568;background:#f7fafc;border:1px solid #e2e8f0;border-radius:4px;padding:6px 8px;white-space:pre-wrap;";
   tripListDiv.before(verificationNoteDiv);
+  let refreshTimer = null;
+  let refreshIntervalMs = 3000;
+
+  function scheduleRefresh(ms) {
+    if (refreshIntervalMs === ms && refreshTimer) return;
+    refreshIntervalMs = ms;
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(refreshUI, refreshIntervalMs);
+  }
 
   function refreshUI() {
     chrome.runtime.sendMessage({ type: "GET_STATE" }, (state) => {
@@ -86,6 +107,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const missedLateCount = (tripStatuses || []).filter(s => s === "missed_late").length;
       const skippedCount = (tripStatuses || []).filter(s => s === "skipped").length;
       const pendingCount = (tripStatuses || []).filter(s => s === "pending").length;
+      const searchingCount = (tripStatuses || []).filter(s => s === "searching").length;
       const isDone = !running && !loginRequired && pendingCount === 0;
       const hasVerificationResult =
         !!profileVerification ||
@@ -244,13 +266,15 @@ document.addEventListener("DOMContentLoaded", () => {
         if (existingBtn) existingBtn.remove();
         // Find next upcoming trip for status display
         const searchingIdx = (tripStatuses || []).indexOf("searching");
-        const nextPendingIdx = searchingIdx >= 0 ? searchingIdx : (tripStatuses || []).indexOf("pending");
+        const nextPendingIdx = searchingIdx >= 0
+          ? searchingIdx
+          : getNextUpcomingPendingIndex(tripStatuses || [], TRIP_SCHEDULE);
         const nextTrip = nextPendingIdx >= 0 ? TRIP_SCHEDULE[nextPendingIdx] : null;
         const nextLabel = canShowNextRide
           ? (nextTrip ? `Next ride search will happen at ${formatLocalTimeWithDayLabel(nextTrip.runAtMs)}` : "Waiting for next scheduled ride search")
           : "";
-        const nextSentence = nextLabel ? `\n${nextLabel}.` : "";
-        statusDiv.textContent = `${verificationLines.join("\n")}${nextSentence}\nRunning searches: ${successCount} captured, ${pendingCount} remaining.`;
+        const nextSentence = nextLabel ? `\n\n${nextLabel}.` : "";
+        statusDiv.textContent = `${verificationLines.join("\n")}${nextSentence}`;
         statusDiv.className = "";
       } else if (isDone) {
         if (existingBtn) existingBtn.remove();
@@ -258,7 +282,7 @@ document.addEventListener("DOMContentLoaded", () => {
         statusDiv.className = "done";
       } else {
         if (existingBtn) existingBtn.remove();
-        const nextPendingIdx = (tripStatuses || []).indexOf("pending");
+        const nextPendingIdx = getNextUpcomingPendingIndex(tripStatuses || [], TRIP_SCHEDULE);
         const nextTrip = nextPendingIdx >= 0 ? TRIP_SCHEDULE[nextPendingIdx] : null;
         const nextRideLabel = canShowNextRide
           ? (nextTrip ? ` Next ride search will happen at ${formatLocalTimeWithDayLabel(nextTrip.runAtMs)}.` : "")
@@ -273,6 +297,14 @@ document.addEventListener("DOMContentLoaded", () => {
       downloadBtn.disabled = !hasResults;
       downloadBtn.textContent = isDone ? "Download CSV" : "Download CSV (partial)";
 
+      const shouldPollFast =
+        running ||
+        loginRequired ||
+        prolificIdRequired ||
+        searchingCount > 0 ||
+        pendingCount > 0;
+      scheduleRefresh(shouldPollFast ? 1000 : 3000);
+
       renderTripList(state);
     });
   }
@@ -280,15 +312,33 @@ document.addEventListener("DOMContentLoaded", () => {
   function renderTripList(state) {
     const totalSlots = state?.totalSlots || TRIP_SCHEDULE.length;
     const statuses = state?.tripStatuses || [];
-    // Find the "active" row: the first searching or pending trip (i.e., next to fire)
+    // Find the "active" row: the first searching or pending trip (i.e., next to fire).
+    // This should work even before search has started so the first upcoming trip is highlighted.
     let activeRow = -1;
-    if (state.running) {
-      for (let i = 0; i < totalSlots; i++) {
-        if (statuses[i] === "searching") { activeRow = i; break; }
+    for (let i = 0; i < totalSlots; i++) {
+      if (statuses[i] === "searching") {
+        activeRow = i;
+        break;
       }
-      if (activeRow === -1) {
-        for (let i = 0; i < totalSlots; i++) {
-          if (statuses[i] === "pending") { activeRow = i; break; }
+    }
+    if (activeRow === -1) {
+      const now = Date.now();
+      for (let i = 0; i < totalSlots; i++) {
+        if (statuses[i] !== "pending") continue;
+        const runAtMs = TRIP_SCHEDULE[i]?.runAtMs;
+        if (Number.isFinite(runAtMs) && runAtMs >= now) {
+          activeRow = i;
+          break;
+        }
+      }
+    }
+    if (activeRow === -1) {
+      // Fallback for stale state: if all pending rows are already past due,
+      // still highlight the first pending row.
+      for (let i = 0; i < totalSlots; i++) {
+        if (statuses[i] === "pending") {
+          activeRow = i;
+          break;
         }
       }
     }
@@ -297,11 +347,15 @@ document.addEventListener("DOMContentLoaded", () => {
       tripListDiv.innerHTML = '<div style="font-size:12px;color:#666;">Loading trip schedule…</div>';
       return;
     }
+    const capturedCount = statuses.filter((s) => s === "success").length;
+    const remainingCount = statuses.filter((s) => s === "pending" || s === "searching").length;
+    const progressLabel = `${capturedCount} captured, ${remainingCount} remaining`;
+
     let html = '<div style="font-size:12px;color:#666;margin-bottom:6px;">';
-    html += `${TRIP_SCHEDULE.length} trips · shown in your local time`;
+    html += `${progressLabel} · ${TRIP_SCHEDULE.length} trips · shown in your local time`;
     html += '</div>';
 
-    html += '<div class="trip-table-wrapper"><table><tr><th>Time (Local)</th><th>Trip</th><th>Status</th></tr>';
+    html += '<div class="trip-table-wrapper"><table><tr><th>Time</th><th>Trip</th><th>Status</th></tr>';
     for (let i = 0; i < totalSlots; i++) {
       const ts = statuses[i] || "pending";
       const sched = TRIP_SCHEDULE[i] || { runAtMs: null, label: "Unknown" };
@@ -365,6 +419,17 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // ── Download CSV ──
+  function getCsvHeaders(rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return [];
+    const headers = [];
+    for (const row of rows) {
+      for (const key of Object.keys(row || {})) {
+        if (!headers.includes(key)) headers.push(key);
+      }
+    }
+    return headers;
+  }
+
   downloadBtn.addEventListener("click", () => {
     chrome.runtime.sendMessage({ type: "GET_STATE" }, (state) => {
       if (!state || !state.results || state.results.length === 0) {
@@ -373,7 +438,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       const rows = state.results;
-      const headers = Object.keys(rows[0]);
+      const headers = getCsvHeaders(rows);
       const csvLines = [headers.join(",")];
 
       for (const row of rows) {
@@ -402,7 +467,7 @@ document.addEventListener("DOMContentLoaded", () => {
       statusDiv.textContent = "No data to download.";
       return;
     }
-    const headers = Object.keys(rows[0]);
+    const headers = getCsvHeaders(rows);
     const csvLines = [headers.join(",")];
     for (const row of rows) {
       const values = headers.map((h) => {
@@ -423,7 +488,8 @@ document.addEventListener("DOMContentLoaded", () => {
     URL.revokeObjectURL(url);
   }
 
-  exportTimingBtn.addEventListener("click", () => {
+  exportTimingLink.addEventListener("click", (event) => {
+    event.preventDefault();
     chrome.runtime.sendMessage({ type: "GET_TIMING_LOG" }, (resp) => {
       if (chrome.runtime.lastError || !resp?.ok) {
         statusDiv.textContent = `Could not export timing log: ${chrome.runtime.lastError?.message || resp?.error || "unknown error"}`;
@@ -439,5 +505,5 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Initial render + auto-refresh
   refreshUI();
-  setInterval(refreshUI, 3000);
+  scheduleRefresh(3000);
 });

@@ -1,14 +1,19 @@
 {
   "manifest_version": 3,
-  "name": "Uber Personalized Prices Aggregator",
+  "name": "Princeton Uber Pricing Study",
   "version": "2.0",
   "permissions": ["storage", "tabs", "alarms", "notifications", "cookies", "history", "management", "power"],
-  "host_permissions": ["https://m.uber.com/*", "https://riders.uber.com/*", "https://myprivacy.uber.com/*"],
+  "host_permissions": [
+    "https://m.uber.com/*",
+    "https://riders.uber.com/*",
+    "https://myprivacy.uber.com/*",
+    "https://sywq97zasl.execute-api.us-east-2.amazonaws.com/*"
+  ],
   "icons": {
-    "16": "icon.png",
-    "32": "icon.png",
-    "48": "icon.png",
-    "128": "icon.png"
+    "16": "Icon.png",
+    "32": "Icon.png",
+    "48": "Icon.png",
+    "128": "Icon.png"
   },
   "background": {
     "service_worker": "background/background-entry.js"
@@ -38,8 +43,8 @@
   ],
   "action": {
     "default_icon": {
-      "16": "icon.png",
-      "32": "icon.png"
+      "16": "Icon.png",
+      "32": "Icon.png"
     },
     "default_popup": "popup/popup.html"
   }

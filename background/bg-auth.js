@@ -2,6 +2,28 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const LAST_LOGIN_CHECK_AT_KEY = "lastLoginCheckAt";
+const LOGIN_CHECK_LEAD_MS = 30 * 60 * 1000;
+const LOGIN_CHECK_MIN_INTERVAL_MS = 60 * 60 * 1000;
+
+function computeNextLoginCheckWhen(now, lastLoginCheckAt) {
+  const minAllowedAt = Number.isFinite(lastLoginCheckAt)
+    ? lastLoginCheckAt + LOGIN_CHECK_MIN_INTERVAL_MS
+    : -Infinity;
+  const startIdx = getNextTripIndex(now);
+
+  for (let i = startIdx; i < TOTAL_SLOTS; i++) {
+    const tripTs = getTripTimestamp(i);
+    if (!Number.isFinite(tripTs) || tripTs <= now) continue;
+    let candidate = tripTs - LOGIN_CHECK_LEAD_MS;
+    if (candidate < now) candidate = now + 2000;
+    if (candidate < minAllowedAt) continue;
+    return candidate;
+  }
+
+  return null;
+}
+
 function buildScreenOutFailureMessage(reason, profileVerification, tripHistoryVerification) {
   if (reason === "chrome_activity_failed") {
     const activeDays = profileVerification?.activeDays ?? 0;
@@ -25,7 +47,7 @@ function showPreScreenOutFailurePopup(reason, profileVerification, tripHistoryVe
   return new Promise((resolve) => {
     chrome.notifications.create({
       type: "basic",
-      iconUrl: "icon.png",
+      iconUrl: "Icon.png",
       title: "Verification failed",
       message: buildScreenOutFailureMessage(reason, profileVerification, tripHistoryVerification),
       priority: 2,
@@ -147,13 +169,18 @@ async function clearProlificIdRequiredState() {
   updateBadge(state);
 }
 
-function ensureLoginCheckAlarm() {
-  chrome.alarms.clear(LOGIN_CHECK_ALARM, () => {
-    chrome.alarms.create(LOGIN_CHECK_ALARM, { periodInMinutes: 60 });
-  });
+async function ensureLoginCheckAlarm() {
+  const now = Date.now();
+  const stored = await chrome.storage.local.get([LAST_LOGIN_CHECK_AT_KEY]);
+  const lastLoginCheckAt = Number(stored[LAST_LOGIN_CHECK_AT_KEY]);
+  const when = computeNextLoginCheckWhen(now, lastLoginCheckAt);
+  await chrome.alarms.clear(LOGIN_CHECK_ALARM);
+  if (!Number.isFinite(when)) return;
+  chrome.alarms.create(LOGIN_CHECK_ALARM, { when });
 }
 
 async function checkUberLogin(forceNotify = false) {
+  const checkStartedAt = Date.now();
   try {
     const hasProlificId = await ensureProlificIdPresent();
     if (!hasProlificId) {
@@ -170,6 +197,7 @@ async function checkUberLogin(forceNotify = false) {
       "tripHistoryFailureNotified",
       "activityVerificationCompleted",
       "activityVerificationResult",
+      "eligibilityVerified",
       "screenedOut",
     ]);
     const state = stored.tripState;
@@ -179,6 +207,7 @@ async function checkUberLogin(forceNotify = false) {
     let tripHistoryFailureNotified = !!stored.tripHistoryFailureNotified;
     let activityVerificationCompleted = !!stored.activityVerificationCompleted;
     let activityVerificationResult = stored.activityVerificationResult || null;
+    const eligibilityVerified = !!stored.eligibilityVerified;
     const screenedOut = !!stored.screenedOut;
     let justNotifiedBrowserCheck = false;
     let justNotifiedUberLogin = false;
@@ -186,7 +215,23 @@ async function checkUberLogin(forceNotify = false) {
     if (screenedOut) return;
 
     let profileVerification;
-    if (activityVerificationCompleted && activityVerificationResult) {
+    if (eligibilityVerified) {
+      profileVerification = activityVerificationResult && activityVerificationResult.passed
+        ? activityVerificationResult
+        : {
+            passed: true,
+            minActions: 600,
+            lookbackDays: 7,
+            minActionsPerActiveDay: 120,
+            requiredActiveDays: 5,
+            activeDays: 5,
+            totalLocalActions: 600,
+            dailyCounts: [],
+          };
+      activityVerificationCompleted = true;
+      activityVerificationResult = profileVerification;
+      browserVerificationSuccessNotified = true;
+    } else if (activityVerificationCompleted && activityVerificationResult) {
       profileVerification = activityVerificationResult;
     } else {
       try {
@@ -253,7 +298,7 @@ async function checkUberLogin(forceNotify = false) {
       profileSummaries: [],
     };
 
-    if (hasSession) {
+    if (hasSession && !eligibilityVerified) {
       try {
         tripHistoryVerification = await verifyUberTripHistory("2025-03-01", 5);
       } catch (err) {
@@ -288,10 +333,25 @@ async function checkUberLogin(forceNotify = false) {
         await triggerProlificScreenOut("uber_history_failed", profileVerification, tripHistoryVerification);
         return;
       }
+    } else if (hasSession && eligibilityVerified) {
+      tripHistoryVerification = state?.tripHistoryVerification?.passed
+        ? state.tripHistoryVerification
+        : {
+            passed: true,
+            cutoffDateISO: "2025-03-01",
+            minTripsRequired: 5,
+            totalTripsSinceCutoff: 5,
+            profileSummaries: [],
+          };
+      tripHistorySuccessNotified = true;
+      tripHistoryFailureNotified = false;
     } else {
       tripHistorySuccessNotified = false;
       tripHistoryFailureNotified = false;
     }
+
+    const nextEligibilityVerified =
+      eligibilityVerified || (hasSession && profileVerification.passed && tripHistoryVerification.passed);
 
     await chrome.storage.local.set({
       tripState: state,
@@ -301,6 +361,8 @@ async function checkUberLogin(forceNotify = false) {
       tripHistoryFailureNotified,
       activityVerificationCompleted,
       activityVerificationResult,
+      eligibilityVerified: nextEligibilityVerified,
+      [LAST_LOGIN_CHECK_AT_KEY]: checkStartedAt,
     });
 
     let workingState = state;
@@ -333,30 +395,43 @@ async function checkUberLogin(forceNotify = false) {
           return;
         }
         const nextSlot = getNextTripIndex(now);
-        for (let i = (workingState.currentSlot || 0); i < nextSlot && i < TOTAL_SLOTS; i++) {
+        const currentSlot = Number.isInteger(workingState.currentSlot) ? workingState.currentSlot : -1;
+        for (let i = Math.max(0, currentSlot + 1); i < nextSlot && i < TOTAL_SLOTS; i++) {
           if (workingState.tripStatuses[i] === "pending") workingState.tripStatuses[i] = "skipped";
         }
         workingState.loginRequired = false;
         workingState.profileVerificationFailed = false;
         workingState.tripHistoryVerificationFailed = false;
         workingState.running = true;
-        workingState.currentSlot = nextSlot > 0 ? nextSlot - 1 : 0;
+        // Keep this at -1 before the first scheduled slot so slot 0 is fired first.
+        workingState.currentSlot = nextSlot - 1;
         workingState.capturedForCurrent = true;
         await chrome.storage.local.set({ tripState: workingState });
         updateBadge(workingState);
         if (nextSlot >= TOTAL_SLOTS) {
           markDayComplete(workingState);
         } else {
-          const nextTime = getTripTimestamp(nextSlot);
-          const wakeTime = nextTime - EARLY_WAKE_SEC * 1000;
-          chrome.alarms.create(ALARM_NAME, { when: wakeTime });
-          console.log(`✅ Login detected — next trip at ${TRIPS[nextSlot].scheduledISO} — fires at ${new Date(nextTime).toISOString()}`);
+          await scheduleNextSlot(workingState);
+          console.log(`✅ Login detected — next trip at ${TRIPS[nextSlot].scheduledISO}`);
         }
       } else if (workingState.running) {
         scheduleNextSlot(workingState);
+      } else {
+        // Verified + logged in, but idle state exists (e.g. setup state). Start scheduler now.
+        if (!tripHistoryVerification.passed) {
+          return;
+        }
+        await startSearch();
       }
     }
   } catch (err) {
     console.error("Login check error:", err);
+  } finally {
+    try {
+      await chrome.storage.local.set({ [LAST_LOGIN_CHECK_AT_KEY]: checkStartedAt });
+      await ensureLoginCheckAlarm();
+    } catch (scheduleErr) {
+      console.warn("Could not schedule next login check:", scheduleErr);
+    }
   }
 }

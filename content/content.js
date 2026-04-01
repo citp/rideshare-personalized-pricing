@@ -51,3 +51,38 @@ window.addEventListener("message", (event) => {
     console.warn("Extension context invalidated — reload the page.", e.message);
   }
 });
+
+function getBrowserLocation(timeoutMs = 4000) {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation || typeof navigator.geolocation.getCurrentPosition !== "function") {
+      resolve({ ok: false, reason: "geolocation_unavailable" });
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        resolve({
+          ok: true,
+          latitude: pos?.coords?.latitude,
+          longitude: pos?.coords?.longitude,
+          accuracyMeters: pos?.coords?.accuracy,
+        });
+      },
+      (err) => {
+        resolve({
+          ok: false,
+          reason: `geolocation_error:${err?.code || "unknown"}`,
+          message: err?.message || "",
+        });
+      },
+      { enableHighAccuracy: false, timeout: timeoutMs, maximumAge: 60 * 1000 }
+    );
+  });
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.type !== "GET_BROWSER_LOCATION") return;
+  getBrowserLocation()
+    .then((result) => sendResponse(result))
+    .catch((err) => sendResponse({ ok: false, reason: String(err) }));
+  return true;
+});

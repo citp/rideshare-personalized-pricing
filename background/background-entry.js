@@ -1,4 +1,5 @@
 importScripts(
+  "bg-trip-list.js",
   "bg-trips.js",
   "bg-verification.js",
   "bg-ui.js",
@@ -108,8 +109,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM_NAME) {
-    onSlotAlarm();
+  if (alarm.name === ALARM_NAME || alarm.name.startsWith(`${ALARM_NAME}:slot:`)) {
+    onSlotAlarm(alarm.name);
   }
   if (alarm.name === LOGIN_CHECK_ALARM) {
     checkUberLogin();
@@ -120,16 +121,18 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-  console.log("Uber Personalized Prices Aggregator installed");
+  console.log("Princeton Uber Pricing Study installed");
   chrome.storage.local.remove(
     [
       "tripState",
+      "prolificId",
       "browserVerificationSuccessNotified",
       "uberLoginSuccessNotified",
       "tripHistorySuccessNotified",
       "tripHistoryFailureNotified",
       "activityVerificationCompleted",
       "activityVerificationResult",
+      "lastLoginCheckAt",
       "screenedOut",
       "screenOutReason",
       "uberDataRequestState",

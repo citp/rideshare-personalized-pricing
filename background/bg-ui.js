@@ -7,14 +7,15 @@ function updateBadge(state) {
     chrome.action.setBadgeText({ text: "!" });
     chrome.action.setBadgeBackgroundColor({ color: "#c53030" });
   } else {
-    const done = state.tripStatuses.filter((s) => s === "success").length;
-    const eligible = state.tripStatuses.filter((s) => s !== "skipped").length;
-    if (state.running) {
-      chrome.action.setBadgeText({ text: `${done}/${eligible}` });
-      chrome.action.setBadgeBackgroundColor({ color: "#2b6cb0" });
+    const statuses = Array.isArray(state.tripStatuses) ? state.tripStatuses : [];
+    const failureCount = statuses.filter((s) => s === "no_data" || s === "no_prices" || s === "missed_late").length;
+
+    // Keep the icon clear during normal/healthy operation.
+    if (failureCount > 0) {
+      chrome.action.setBadgeText({ text: String(Math.min(failureCount, 99)) });
+      chrome.action.setBadgeBackgroundColor({ color: "#c53030" });
     } else {
-      chrome.action.setBadgeText({ text: `${done}/${eligible}` });
-      chrome.action.setBadgeBackgroundColor({ color: "#276749" });
+      chrome.action.setBadgeText({ text: "" });
     }
   }
 }
@@ -39,7 +40,7 @@ function sendBrowserActivitySuccessNotification(profileVerification) {
   const requiredActiveDays = profileVerification?.requiredActiveDays ?? 5;
   chrome.notifications.create({
     type: "basic",
-    iconUrl: "icon.png",
+    iconUrl: "Icon.png",
     title: "Verification succeeded",
     message: `Chrome activity check succeeded: ${activeDays}/${requiredActiveDays} active days, ${totalLocalActions} local actions in ${lookbackDays} days.`,
     priority: 1,
@@ -49,7 +50,7 @@ function sendBrowserActivitySuccessNotification(profileVerification) {
 function sendUberLoginSuccessNotification() {
   chrome.notifications.create({
     type: "basic",
-    iconUrl: "icon.png",
+    iconUrl: "Icon.png",
     title: "Verification succeeded",
     message: "Uber login check succeeded. Active Uber session detected.",
     priority: 1,
@@ -62,7 +63,7 @@ function sendTripHistorySuccessNotification(verification) {
   const cutoffDateISO = verification?.cutoffDateISO ?? "2025-03-01";
   chrome.notifications.create({
     type: "basic",
-    iconUrl: "icon.png",
+    iconUrl: "Icon.png",
     title: "Verification succeeded",
     message: `Uber trips check succeeded: ${total}/${minTripsRequired}+ trips since ${cutoffDateISO}.`,
     priority: 1,
@@ -85,7 +86,7 @@ function sendTripHistoryFailureNotification(verification) {
       : "Not enough trips found.";
   chrome.notifications.create({
     type: "basic",
-    iconUrl: "icon.png",
+    iconUrl: "Icon.png",
     title: "Verification failed",
     message: `Uber trips check failed: ${total}/${minTripsRequired} trips since ${cutoffDateISO}. ${reason} Open extension popup for details.`,
     priority: 1,
@@ -98,7 +99,7 @@ function sendSearchReliabilityWarningNotification(health) {
   const percent = Math.round((health?.failureRate ?? 0) * 100);
   chrome.notifications.create({
     type: "basic",
-    iconUrl: "icon.png",
+    iconUrl: "Icon.png",
     title: "Search reliability warning",
     message: `High failure rate: ${failed}/${total} recent searches failed (${percent}%). Open extension popup for details.`,
     priority: 2,

@@ -29,11 +29,17 @@ function buildBlockedState(profileVerification, tripHistoryVerification) {
 const SCHEDULER_CONFIG_KEY = "schedulerConfig";
 const TIMING_LOG_KEY = "timingLog";
 const FAILURE_ALERT_LAST_DAY_KEY = "failureAlertLastDay";
-const DEFAULT_EARLY_WAKE_SEC = 90;
-const DEFAULT_LATE_FIRE_GRACE_MS = 15000;
+const DEFAULT_EARLY_WAKE_SEC = 180;
+const DEFAULT_LATE_FIRE_GRACE_MS = 30000;
 const MAX_TIMING_LOG_ROWS = 2000;
 const FAILURE_WINDOW_SIZE = 10;
 const FAILURE_RATE_THRESHOLD = 0.5;
+const AWS_UPLOAD_LAMBDA_URL = "https://sywq97zasl.execute-api.us-east-2.amazonaws.com/upload";
+const AWS_UPLOAD_STUDY_TYPE = "pricing";
+const AWS_UPLOAD_MAX_ROWS_PER_FILE = 100;
+const APPROX_COORD_DECIMALS = 2;
+const SCHEDULER_ALARM_PREFIX = `${ALARM_NAME}:slot:`;
+const PREWARM_OFFSETS_MS = [5 * 60 * 1000, 3 * 60 * 1000, 90 * 1000, 30 * 1000];
 
 function sanitizeSchedulerConfig(raw) {
   const earlyWakeSecNum = Number(raw?.earlyWakeSec);
@@ -46,6 +52,61 @@ function sanitizeSchedulerConfig(raw) {
 async function getSchedulerConfig() {
   const data = await chrome.storage.local.get([SCHEDULER_CONFIG_KEY]);
   return sanitizeSchedulerConfig(data[SCHEDULER_CONFIG_KEY]);
+}
+
+async function getStoredProlificId() {
+  const stored = await chrome.storage.local.get(["prolificId"]);
+  return typeof stored.prolificId === "string" ? stored.prolificId.trim() : "";
+}
+
+function buildSchedulerAlarmName(slot, phase, offsetMs) {
+  return `${SCHEDULER_ALARM_PREFIX}${slot}:phase:${phase}:offset:${offsetMs}`;
+}
+
+function parseSchedulerAlarmName(name) {
+  if (name === ALARM_NAME) return { slot: null, phase: "exact", offsetMs: 0 };
+  const match = /^uber-trip-scheduler:slot:(\d+):phase:(prewarm|exact):offset:(\d+)$/.exec(name || "");
+  if (!match) return null;
+  return {
+    slot: Number(match[1]),
+    phase: match[2],
+    offsetMs: Number(match[3]),
+  };
+}
+
+async function ensureUberTabWarmup(nextSlot) {
+  try {
+    const tabs = await chrome.tabs.query({ url: "https://m.uber.com/*" });
+    if (tabs.length === 0) {
+      await chrome.windows.create({
+        url: "https://m.uber.com/",
+        focused: false,
+        state: "minimized",
+      });
+      console.log(`🔥 Prewarm: created Uber tab for slot ${nextSlot}`);
+      return;
+    }
+    if (tabs[0]?.id) {
+      await chrome.tabs.update(tabs[0].id, { active: false });
+      console.log(`🔥 Prewarm: touched existing Uber tab for slot ${nextSlot}`);
+    }
+  } catch (err) {
+    console.warn("Prewarm failed:", err);
+  }
+}
+
+async function scheduleSlotAlarms(slot, cfg) {
+  const targetTime = getTripTimestamp(slot);
+  const now = Date.now();
+  const warmOffsets = Array.from(new Set([...PREWARM_OFFSETS_MS, cfg.earlyWakeSec * 1000]));
+  for (const offsetMs of warmOffsets) {
+    const when = targetTime - offsetMs;
+    if (when <= now + 250) continue;
+    const name = buildSchedulerAlarmName(slot, "prewarm", offsetMs);
+    chrome.alarms.create(name, { when });
+  }
+  chrome.alarms.create(buildSchedulerAlarmName(slot, "exact", 0), { when: targetTime });
+  console.log(`⏰ Slot ${slot} alarms scheduled for ${TRIPS[slot].scheduledISO}`);
 }
 
 async function appendTimingLog(entry) {
@@ -97,6 +158,108 @@ function buildSearchHealth(rows) {
     threshold: FAILURE_RATE_THRESHOLD,
     isFailing: sampleSize >= FAILURE_WINDOW_SIZE && failureRate >= FAILURE_RATE_THRESHOLD,
   };
+}
+
+function buildAwsUploadBatches(rows, maxRowsPerBatch = AWS_UPLOAD_MAX_ROWS_PER_FILE) {
+  if (!Array.isArray(rows) || rows.length === 0) return [[]];
+  const batches = [];
+  for (let i = 0; i < rows.length; i += maxRowsPerBatch) {
+    batches.push(rows.slice(i, i + maxRowsPerBatch));
+  }
+  return batches;
+}
+
+function toApproxCoordinate(value, decimals = APPROX_COORD_DECIMALS) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "";
+  const precision = Math.pow(10, decimals);
+  return Math.round(num * precision) / precision;
+}
+
+async function getApproxBrowserLocationForCapture() {
+  try {
+    const tabs = await chrome.tabs.query({ url: "https://m.uber.com/*" });
+    const uberTab = tabs[0];
+    if (!uberTab?.id) return { approxUserLat: "", approxUserLng: "", locationSource: "unavailable" };
+
+    const response = await chrome.tabs.sendMessage(uberTab.id, { type: "GET_BROWSER_LOCATION" });
+    if (!response?.ok) return { approxUserLat: "", approxUserLng: "", locationSource: "unavailable" };
+
+    return {
+      approxUserLat: toApproxCoordinate(response.latitude),
+      approxUserLng: toApproxCoordinate(response.longitude),
+      locationSource: "browser_geolocation",
+    };
+  } catch (_) {
+    return { approxUserLat: "", approxUserLng: "", locationSource: "unavailable" };
+  }
+}
+
+async function uploadSearchRowsToAws({ slot, trip, outcome, rows }) {
+  try {
+    const pid = await getStoredProlificId();
+    if (!pid) {
+      console.warn("AWS upload skipped: prolificId missing");
+      return { ok: false, reason: "missing_prolific_id" };
+    }
+
+    const batches = buildAwsUploadBatches(rows);
+    let uploadedFiles = 0;
+    for (let index = 0; index < batches.length; index++) {
+      const batchRows = batches[index];
+      const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const fileName = `price_search_slot_${slot}_part_${index + 1}_of_${batches.length}_${uniqueSuffix}.json`;
+
+      const signedRes = await fetch(AWS_UPLOAD_LAMBDA_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pid,
+          fileName,
+          studyType: AWS_UPLOAD_STUDY_TYPE,
+        }),
+      });
+      if (!signedRes.ok) {
+        const errorText = await signedRes.text();
+        throw new Error(`signed_url_failed: ${signedRes.status} ${errorText}`);
+      }
+
+      const signedJson = await signedRes.json();
+      const uploadUrl = signedJson?.uploadUrl;
+      if (!uploadUrl) {
+        throw new Error("signed_url_missing_upload_url");
+      }
+
+      const payload = {
+        capturedAt: new Date().toISOString(),
+        prolificId: pid,
+        slot,
+        scheduledISO: trip?.scheduledISO || "",
+        scheduledET: trip?.etTime || "",
+        tripLabel: trip?.label || "",
+        outcome,
+        batchIndex: index + 1,
+        batchCount: batches.length,
+        rows: batchRows,
+      };
+
+      const uploadRes = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!uploadRes.ok) {
+        throw new Error(`upload_failed: ${uploadRes.status} ${uploadRes.statusText}`);
+      }
+
+      uploadedFiles += 1;
+    }
+
+    return { ok: true, uploadedFiles };
+  } catch (err) {
+    console.error("AWS upload error:", err);
+    return { ok: false, reason: String(err) };
+  }
 }
 
 async function updateSearchHealthAndMaybeNotify(state) {
@@ -188,6 +351,8 @@ async function startSearch() {
   const endTime = SCHEDULE_END_MS + 1000;
   const nextSlot = getNextTripIndex(now);
   console.log(`▶ Starting schedule: next trip is #${nextSlot} (${nextSlot < TOTAL_SLOTS ? TRIPS[nextSlot].scheduledISO : "none"}), ends at ${new Date(endTime).toISOString()}`);
+  const existing = await chrome.storage.local.get(["tripState"]);
+  const previousState = existing.tripState || null;
 
   const tripStatuses = new Array(TOTAL_SLOTS).fill("pending");
   for (let i = 0; i < nextSlot; i++) tripStatuses[i] = "skipped";
@@ -196,14 +361,17 @@ async function startSearch() {
     running: true,
     dayStart: SCHEDULE_START_MS,
     endTime,
-    currentSlot: nextSlot > 0 ? nextSlot - 1 : 0,
+    // Keep this at -1 before the first scheduled slot so slot 0 is fired first.
+    currentSlot: nextSlot - 1,
     totalSlots: TOTAL_SLOTS,
     results: [],
     capturedForCurrent: true,
     tripStatuses,
     loginRequired: false,
-    profileVerificationFailed: false,
-    tripHistoryVerificationFailed: false,
+    profileVerification: previousState?.profileVerification || null,
+    tripHistoryVerification: previousState?.tripHistoryVerification || null,
+    profileVerificationFailed: previousState?.profileVerification ? !previousState.profileVerification.passed : false,
+    tripHistoryVerificationFailed: previousState?.tripHistoryVerification ? !previousState.tripHistoryVerification.passed : false,
     startTime: now,
     timingMetrics: [],
     searchHealth: null,
@@ -217,10 +385,8 @@ async function startSearch() {
     markDayComplete(state);
   } else {
     const cfg = await getSchedulerConfig();
-    const nextTime = getTripTimestamp(nextSlot);
-    const wakeTime = nextTime - cfg.earlyWakeSec * 1000;
-    chrome.alarms.create(ALARM_NAME, { when: wakeTime });
-    console.log(`⏰ First trip: ${TRIPS[nextSlot].scheduledISO} — fires at ${new Date(nextTime).toISOString()}`);
+    await scheduleSlotAlarms(nextSlot, cfg);
+    console.log(`⏰ First trip: ${TRIPS[nextSlot].scheduledISO} — exact at ${new Date(getTripTimestamp(nextSlot)).toISOString()}`);
   }
 }
 
@@ -232,29 +398,18 @@ async function scheduleNextSlot(state) {
     return;
   }
   const cfg = await getSchedulerConfig();
-  const nextTime = getTripTimestamp(nextSlot);
-  const wakeTime = nextTime - cfg.earlyWakeSec * 1000;
-  chrome.alarms.create(ALARM_NAME, { when: wakeTime });
-  console.log(`⏰ Next: ${TRIPS[nextSlot].scheduledISO} — fires at ${new Date(nextTime).toISOString()}`);
-}
-
-function waitForExactMark(targetTime, callback) {
-  function poll() {
-    const remaining = targetTime - Date.now();
-    if (remaining <= 0) {
-      callback();
-      return;
-    }
-    const delay = remaining > 2000 ? 1000 : remaining > 200 ? 50 : 5;
-    setTimeout(poll, delay);
-  }
-  poll();
+  await scheduleSlotAlarms(nextSlot, cfg);
+  console.log(`⏰ Next: ${TRIPS[nextSlot].scheduledISO} — exact at ${new Date(getTripTimestamp(nextSlot)).toISOString()}`);
 }
 
 let _pendingSlot = -1;
+const _captureSlotsInProgress = new Set();
 
-async function onSlotAlarm() {
+async function onSlotAlarm(alarmName = ALARM_NAME) {
   try {
+    const alarmInfo = parseSchedulerAlarmName(alarmName);
+    const phase = alarmInfo?.phase || "exact";
+    const alarmSlot = Number.isInteger(alarmInfo?.slot) ? alarmInfo.slot : null;
     const alarmFiredAt = Date.now();
     const cfg = await getSchedulerConfig();
     const data = await chrome.storage.local.get(["tripState"]);
@@ -263,6 +418,18 @@ async function onSlotAlarm() {
 
     if (!state.capturedForCurrent && state.tripStatuses[state.currentSlot] === "searching") {
       state.tripStatuses[state.currentSlot] = "no_data";
+      const currentTrip = TRIPS[state.currentSlot];
+      const awsResult = await uploadSearchRowsToAws({
+        slot: state.currentSlot,
+        trip: currentTrip,
+        outcome: "no_data",
+        rows: [],
+      });
+      if (!awsResult.ok) {
+        console.warn(`⚠ AWS upload failed for slot ${state.currentSlot}: ${awsResult.reason || "unknown_error"}`);
+      } else {
+        console.log(`☁️ AWS upload complete for slot ${state.currentSlot}: ${awsResult.uploadedFiles} file(s)`);
+      }
       try {
         const tabs = await chrome.tabs.query({ url: "https://m.uber.com/*" });
         if (tabs.length > 0 && !tabs[0].url.includes("product-selection")) {
@@ -284,80 +451,71 @@ async function onSlotAlarm() {
       return;
     }
 
-    if (_pendingSlot === nextSlot) {
-      return;
-    }
-    _pendingSlot = nextSlot;
+    if (alarmSlot !== null && alarmSlot !== nextSlot) return;
 
     const targetTime = getTripTimestamp(nextSlot);
-
-    for (let i = state.currentSlot + 1; i < nextSlot; i++) {
-      if (state.tripStatuses[i] === "pending") state.tripStatuses[i] = "skipped";
+    if (phase === "prewarm") {
+      if (Date.now() < targetTime + cfg.lateFireGraceMs) {
+        await ensureUberTabWarmup(nextSlot);
+      }
+      return;
     }
 
-    console.log(`⏳ Waiting for exact ${TRIPS[nextSlot].scheduledISO} (${targetTime - Date.now()}ms remaining)`);
-    waitForExactMark(targetTime, async () => {
-      try {
-        const firedAt = Date.now();
-        const driftMs = firedAt - targetTime;
-        const fresh = await chrome.storage.local.get(["tripState"]);
-        const s = fresh.tripState;
-        if (!s || !s.running) {
-          _pendingSlot = -1;
-          return;
-        }
-        if (s.currentSlot >= nextSlot) {
-          _pendingSlot = -1;
-          return;
-        }
+    if (_pendingSlot === nextSlot) return;
+    _pendingSlot = nextSlot;
+    try {
+      const firedAt = Date.now();
+      const driftMs = firedAt - targetTime;
+      const fresh = await chrome.storage.local.get(["tripState"]);
+      const s = fresh.tripState;
+      if (!s || !s.running) return;
+      if (s.currentSlot >= nextSlot) return;
 
-        if (driftMs > cfg.lateFireGraceMs) {
-          s.currentSlot = nextSlot;
-          s.capturedForCurrent = true;
-          s.tripStatuses[nextSlot] = "missed_late";
-          const metric = upsertSlotMetric(s, nextSlot, {
-            targetTime,
-            alarmFiredAt,
-            tripTriggeredAt: firedAt,
-            driftMs,
-            outcome: "missed_late",
-            thresholdMs: cfg.lateFireGraceMs,
-          });
-          await appendTimingLog({
-            ...metric,
-            timestamp: new Date().toISOString(),
-            tripLabel: TRIPS[nextSlot].label,
-            scheduledISO: TRIPS[nextSlot].scheduledISO,
-          });
-          await updateSearchHealthAndMaybeNotify(s);
-          updateBadge(s);
-          _pendingSlot = -1;
-          await scheduleNextSlot(s);
-          console.warn(`⚠ Skipped slot ${nextSlot} as late by ${driftMs}ms (threshold ${cfg.lateFireGraceMs}ms)`);
-          return;
-        }
-
-        console.log(`🎯 Firing trip #${nextSlot} (${TRIPS[nextSlot].scheduledISO}) at ${new Date().toISOString()}`);
+      if (driftMs > cfg.lateFireGraceMs) {
+        const prolificId = await getStoredProlificId();
         s.currentSlot = nextSlot;
-        s.capturedForCurrent = false;
-        upsertSlotMetric(s, nextSlot, {
+        s.capturedForCurrent = true;
+        s.tripStatuses[nextSlot] = "missed_late";
+        const metric = upsertSlotMetric(s, nextSlot, {
           targetTime,
           alarmFiredAt,
           tripTriggeredAt: firedAt,
           driftMs,
-          outcome: "triggered",
+          outcome: "missed_late",
           thresholdMs: cfg.lateFireGraceMs,
         });
-        await chrome.storage.local.set({ tripState: s });
+        await appendTimingLog({
+          ...metric,
+          timestamp: new Date().toISOString(),
+          tripLabel: TRIPS[nextSlot].label,
+          scheduledISO: TRIPS[nextSlot].scheduledISO,
+          prolificId,
+        });
+        await updateSearchHealthAndMaybeNotify(s);
         updateBadge(s);
-        _pendingSlot = -1;
-        runTrip(s);
         await scheduleNextSlot(s);
-      } catch (err) {
-        _pendingSlot = -1;
-        console.error("onSlotAlarm callback error:", err);
+        console.warn(`⚠ Skipped slot ${nextSlot} as late by ${driftMs}ms (threshold ${cfg.lateFireGraceMs}ms)`);
+        return;
       }
-    });
+
+      console.log(`🎯 Firing trip #${nextSlot} (${TRIPS[nextSlot].scheduledISO}) at ${new Date().toISOString()}`);
+      s.currentSlot = nextSlot;
+      s.capturedForCurrent = false;
+      upsertSlotMetric(s, nextSlot, {
+        targetTime,
+        alarmFiredAt,
+        tripTriggeredAt: firedAt,
+        driftMs,
+        outcome: "triggered",
+        thresholdMs: cfg.lateFireGraceMs,
+      });
+      await chrome.storage.local.set({ tripState: s });
+      updateBadge(s);
+      runTrip(s);
+      await scheduleNextSlot(s);
+    } finally {
+      _pendingSlot = -1;
+    }
   } catch (err) {
     console.error("onSlotAlarm error:", err);
   }
@@ -422,8 +580,20 @@ async function runTrip(state) {
       const s = stored.tripState;
       if (!s) return;
       if (s.currentSlot === slot && !s.capturedForCurrent && s.tripStatuses[slot] === "searching") {
+        const prolificId = await getStoredProlificId();
         console.warn(`⏰ Capture timeout for trip #${slot} (${trip.scheduledISO}) — marking no_data`);
         s.tripStatuses[slot] = "no_data";
+        const awsResult = await uploadSearchRowsToAws({
+          slot,
+          trip,
+          outcome: "no_data",
+          rows: [],
+        });
+        if (!awsResult.ok) {
+          console.warn(`⚠ AWS upload failed for slot ${slot}: ${awsResult.reason || "unknown_error"}`);
+        } else {
+          console.log(`☁️ AWS upload complete for slot ${slot}: ${awsResult.uploadedFiles} file(s)`);
+        }
         const metric = upsertSlotMetric(s, slot, {
           captureEndedAt: Date.now(),
           outcome: "no_data",
@@ -433,6 +603,7 @@ async function runTrip(state) {
           timestamp: new Date().toISOString(),
           tripLabel: trip.label,
           scheduledISO: trip.scheduledISO,
+          prolificId,
         });
         await updateSearchHealthAndMaybeNotify(s);
         updateBadge(s);
@@ -448,105 +619,147 @@ async function handleProductsCapture(productsData) {
   const state = stored.tripState;
   if (!state || !state.running) return;
   if (state.capturedForCurrent) return;
+  const slot = state.currentSlot;
+  if (_captureSlotsInProgress.has(slot)) {
+    console.log(`ℹ️ Duplicate products payload ignored for slot ${slot}`);
+    return;
+  }
+  _captureSlotsInProgress.add(slot);
 
-  state.capturedForCurrent = true;
+  try {
+    state.capturedForCurrent = true;
+    // Persist capture lock immediately to avoid race with another products payload.
+    await chrome.storage.local.set({ tripState: state });
 
-  const trip = TRIPS[state.currentSlot];
-  const tiers = productsData?.data?.products?.tiers || [];
-  let count = 0;
-  let hasValidFare = false;
+    const trip = TRIPS[slot];
+    const prolificId = await getStoredProlificId();
+    const locationSnapshot = await getApproxBrowserLocationForCapture();
+    const tiers = productsData?.data?.products?.tiers || [];
+    let count = 0;
+    let hasValidFare = false;
+    const slotRowsForUpload = [];
 
-  for (const tier of tiers) {
-    for (const product of tier.products || []) {
-      for (const fare of product.fares || []) {
-        let meta = {};
-        try {
-          meta = JSON.parse(fare.meta);
-        } catch (_) {}
+    for (const tier of tiers) {
+      for (const product of tier.products || []) {
+        for (const fare of product.fares || []) {
+          let meta = {};
+          try {
+            meta = JSON.parse(fare.meta);
+          } catch (_) {}
 
-        const uf = meta?.upfrontFare || {};
-        const dynFare = uf?.dynamicFareInfo || {};
-        const sig = uf?.signature || {};
+          const uf = meta?.upfrontFare || {};
+          const dynFare = uf?.dynamicFareInfo || {};
+          const sig = uf?.signature || {};
+          if (fare.fare && fare.fare !== "" && fare.fareAmountE5 > 0) {
+            hasValidFare = true;
+          }
 
-        if (fare.fare && fare.fare !== "" && fare.fareAmountE5 > 0) {
-          hasValidFare = true;
+          const capturedRow = {
+            prolificId,
+            slot,
+            scheduledISO: trip.scheduledISO,
+            scheduledET: trip.etTime,
+            tripLabel: trip.label,
+            searchTime: new Date().toISOString(),
+            tier: tier.title,
+            productName: product.displayName,
+            productType: product.productClassificationTypeName,
+            estimatedTripTime: product.estimatedTripTime ?? "",
+            etaStringShort: product.etaStringShort ?? "",
+            fare: fare.fare ?? "",
+            preAdjustmentValue: fare.preAdjustmentValue ?? "",
+            discountPrimary: fare.discountPrimary ?? "",
+            discountedFare: uf.discountedFare ?? "",
+            hasBenefitsOnFare: product.hasBenefitsOnFare ?? "",
+            hasPromo: fare.hasPromo ?? "",
+            hasRidePass: fare.hasRidePass ?? "",
+            fareEstimateInfo: JSON.stringify(meta.fareEstimateInfo ?? ""),
+            ezpzFareBreakdown: JSON.stringify(uf.ezpzFareBreakdown ?? ""),
+            multiplier: dynFare.multiplier ?? "",
+            surgeSuppressionThreshold: dynFare.surgeSuppressionThreshold ?? "",
+            approxUserLat: locationSnapshot.approxUserLat,
+            approxUserLng: locationSnapshot.approxUserLng,
+            approxUserLocationSource: locationSnapshot.locationSource,
+            originLat: uf.originLat ?? "",
+            originLng: uf.originLng ?? "",
+            destinationLat: uf.destinationLat ?? "",
+            destinationLng: uf.destinationLng ?? "",
+            capacity: uf.capacity ?? "",
+            issuedAt: sig.issuedAt ?? "",
+            isSobriety: dynFare.isSobriety ?? "",
+          };
+          state.results.push(capturedRow);
+          slotRowsForUpload.push(capturedRow);
+          count++;
         }
-
-        state.results.push({
-          slot: state.currentSlot,
-          scheduledISO: trip.scheduledISO,
-          scheduledET: trip.etTime,
-          tripLabel: trip.label,
-          searchTime: new Date().toISOString(),
-          tier: tier.title,
-          productName: product.displayName,
-          productType: product.productClassificationTypeName,
-          estimatedTripTime: product.estimatedTripTime ?? "",
-          etaStringShort: product.etaStringShort ?? "",
-          fare: fare.fare ?? "",
-          preAdjustmentValue: fare.preAdjustmentValue ?? "",
-          discountPrimary: fare.discountPrimary ?? "",
-          discountedFare: uf.discountedFare ?? "",
-          hasBenefitsOnFare: product.hasBenefitsOnFare ?? "",
-          hasPromo: fare.hasPromo ?? "",
-          hasRidePass: fare.hasRidePass ?? "",
-          fareEstimateInfo: JSON.stringify(meta.fareEstimateInfo ?? ""),
-          ezpzFareBreakdown: JSON.stringify(uf.ezpzFareBreakdown ?? ""),
-          multiplier: dynFare.multiplier ?? "",
-          surgeSuppressionThreshold: dynFare.surgeSuppressionThreshold ?? "",
-          requestLocationLat: meta?.pricingParams?.requestLocation?.latitude ?? "",
-          requestLocationLng: meta?.pricingParams?.requestLocation?.longitude ?? "",
-          originLat: uf.originLat ?? "",
-          originLng: uf.originLng ?? "",
-          destinationLat: uf.destinationLat ?? "",
-          destinationLng: uf.destinationLng ?? "",
-          capacity: uf.capacity ?? "",
-          issuedAt: sig.issuedAt ?? "",
-          isSobriety: dynFare.isSobriety ?? "",
-        });
-        count++;
       }
     }
-  }
 
-  if (hasValidFare) {
-    state.tripStatuses[state.currentSlot] = "success";
-    const metric = upsertSlotMetric(state, state.currentSlot, {
-      captureEndedAt: Date.now(),
-      outcome: "success",
-      capturedRows: count,
-    });
-    await appendTimingLog({
-      ...metric,
-      timestamp: new Date().toISOString(),
-      tripLabel: trip.label,
-      scheduledISO: trip.scheduledISO,
-    });
-    await updateSearchHealthAndMaybeNotify(state);
-    console.log(`💾 Slot ${state.currentSlot} captured: ${count} products, ${state.results.length} total rows`);
-  } else {
-    state.tripStatuses[state.currentSlot] = "no_prices";
-    state.loginRequired = true;
-    state.running = false;
-    state.results.splice(state.results.length - count, count);
-    chrome.alarms.clear(ALARM_NAME);
-    releaseSearchKeepAwake();
-    const metric = upsertSlotMetric(state, state.currentSlot, {
-      captureEndedAt: Date.now(),
-      outcome: "no_prices",
-      capturedRows: 0,
-    });
-    await appendTimingLog({
-      ...metric,
-      timestamp: new Date().toISOString(),
-      tripLabel: trip.label,
-      scheduledISO: trip.scheduledISO,
-    });
-    await updateSearchHealthAndMaybeNotify(state);
-    console.warn(`⚠ Slot ${state.currentSlot}: no prices — not logged in`);
-    sendLoginNotification();
-  }
+    if (hasValidFare) {
+      state.tripStatuses[slot] = "success";
+      const metric = upsertSlotMetric(state, slot, {
+        captureEndedAt: Date.now(),
+        outcome: "success",
+        capturedRows: count,
+      });
+      await appendTimingLog({
+        ...metric,
+        timestamp: new Date().toISOString(),
+        tripLabel: trip.label,
+        scheduledISO: trip.scheduledISO,
+        prolificId,
+      });
+      await updateSearchHealthAndMaybeNotify(state);
+      console.log(`💾 Slot ${slot} captured: ${count} products, ${state.results.length} total rows`);
+      const awsResult = await uploadSearchRowsToAws({
+        slot,
+        trip,
+        outcome: "success",
+        rows: slotRowsForUpload,
+      });
+      if (!awsResult.ok) {
+        console.warn(`⚠ AWS upload failed for slot ${slot}: ${awsResult.reason || "unknown_error"}`);
+      } else {
+        console.log(`☁️ AWS upload complete for slot ${slot}: ${awsResult.uploadedFiles} file(s)`);
+      }
+    } else {
+      state.tripStatuses[slot] = "no_prices";
+      state.loginRequired = true;
+      state.running = false;
+      state.results.splice(state.results.length - count, count);
+      chrome.alarms.clear(ALARM_NAME);
+      releaseSearchKeepAwake();
+      const metric = upsertSlotMetric(state, slot, {
+        captureEndedAt: Date.now(),
+        outcome: "no_prices",
+        capturedRows: 0,
+      });
+      await appendTimingLog({
+        ...metric,
+        timestamp: new Date().toISOString(),
+        tripLabel: trip.label,
+        scheduledISO: trip.scheduledISO,
+        prolificId,
+      });
+      await updateSearchHealthAndMaybeNotify(state);
+      console.warn(`⚠ Slot ${slot}: no prices — not logged in`);
+      sendLoginNotification();
+      const awsResult = await uploadSearchRowsToAws({
+        slot,
+        trip,
+        outcome: "no_prices",
+        rows: [],
+      });
+      if (!awsResult.ok) {
+        console.warn(`⚠ AWS upload failed for slot ${slot}: ${awsResult.reason || "unknown_error"}`);
+      } else {
+        console.log(`☁️ AWS upload complete for slot ${slot}: ${awsResult.uploadedFiles} file(s)`);
+      }
+    }
 
-  await chrome.storage.local.set({ tripState: state });
-  updateBadge(state);
+    await chrome.storage.local.set({ tripState: state });
+    updateBadge(state);
+  } finally {
+    _captureSlotsInProgress.delete(slot);
+  }
 }
