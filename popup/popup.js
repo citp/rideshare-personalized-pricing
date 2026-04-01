@@ -1,6 +1,17 @@
 // Trip schedule is fetched from background.js TRIPS — single source of truth.
 let TRIP_SCHEDULE = [];
 
+function formatLocalDateTime(ms) {
+  const date = new Date(ms);
+  const dateLabel = date.toLocaleDateString([], { month: "short", day: "numeric" });
+  const timeLabel = date.toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  return `${dateLabel} ${timeLabel}`;
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   // Fetch the schedule once on popup open
   chrome.runtime.sendMessage({ type: "GET_TRIP_SCHEDULE" }, (schedule) => {
@@ -14,6 +25,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const downloadBtn = document.getElementById("download-btn");
   const statusDiv = document.getElementById("status");
   const tripListDiv = document.getElementById("trip-list");
+  const verificationNoteDiv = document.createElement("div");
+  verificationNoteDiv.id = "verification-note";
+  verificationNoteDiv.style.cssText = "margin:8px 0 10px;font-size:12px;color:#4a5568;background:#f7fafc;border:1px solid #e2e8f0;border-radius:4px;padding:6px 8px;white-space:pre-wrap;";
+  tripListDiv.before(verificationNoteDiv);
 
   function refreshUI() {
     chrome.runtime.sendMessage({ type: "GET_STATE" }, (state) => {
@@ -26,18 +41,92 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
       }
 
-      const { running, totalSlots, results, loginRequired, tripStatuses, currentSlot, endTime } = state;
+      const {
+        running,
+        totalSlots,
+        results,
+        loginRequired,
+        tripStatuses,
+        prolificIdRequired,
+        screenedOut,
+        screenOutReason,
+        profileVerificationFailed,
+        profileVerification,
+        tripHistoryVerificationFailed,
+        tripHistoryVerification,
+      } = state;
       const hasResults = results && results.length > 0;
       const successCount = (tripStatuses || []).filter(s => s === "success").length;
       const errorCount = (tripStatuses || []).filter(s => s === "no_data" || s === "no_prices").length;
       const skippedCount = (tripStatuses || []).filter(s => s === "skipped").length;
       const pendingCount = (tripStatuses || []).filter(s => s === "pending").length;
       const isDone = !running && !loginRequired && pendingCount === 0;
+      const tripSummaries = tripHistoryVerification?.profileSummaries || [];
+      const nonOkSummaries = tripSummaries.filter((s) => s && s.fetched && s.httpOk === false);
+      const fetchFailures = tripSummaries.filter((s) => s && s.fetched === false);
+
+      const hasVerificationFailure =
+        !!profileVerificationFailed ||
+        !!tripHistoryVerificationFailed ||
+        fetchFailures.length > 0 ||
+        nonOkSummaries.length > 0 ||
+        !!profileVerification?.error ||
+        !!tripHistoryVerification?.error;
+
+      const detailParts = [];
+      if (hasVerificationFailure) {
+        if (profileVerification) {
+          const activeDays = profileVerification?.activeDays ?? 0;
+          const requiredActiveDays = profileVerification?.requiredActiveDays ?? 5;
+          const totalLocal = profileVerification?.totalLocalActions ?? 0;
+          detailParts.push(`Chrome activity: ${activeDays}/${requiredActiveDays} active days, ${totalLocal} local actions`);
+          if (profileVerification?.error) detailParts.push(`Profile verification error: ${profileVerification.error}`);
+        }
+        if (tripHistoryVerification) {
+          const trips = tripHistoryVerification?.totalTripsSinceCutoff ?? 0;
+          const minTrips = tripHistoryVerification?.minTripsRequired ?? 5;
+          const cutoff = tripHistoryVerification?.cutoffDateISO ?? "2025-03-01";
+          let tripDetail = `Uber trips since ${cutoff}: ${trips}/${minTrips}`;
+          if (fetchFailures.length > 0) {
+            tripDetail += " (page fetch error)";
+          } else if (nonOkSummaries.length > 0) {
+            tripDetail += ` (non-OK: ${nonOkSummaries.map((s) => `${s.profile}:${s.httpStatus}`).join(", ")})`;
+          }
+          detailParts.push(tripDetail);
+          if (tripHistoryVerification?.error) detailParts.push(`Trip history verification error: ${tripHistoryVerification.error}`);
+          const summaries = tripHistoryVerification?.profileSummaries || [];
+          for (const s of summaries) {
+            if (!s) continue;
+            const dbg = s.debug || {};
+            detailParts.push(
+              `${s.profile}: fetched=${s.fetched} listTs=${s.listTimestampCount ?? 0} links=${s.tripLinksFound ?? 0} found=${s.recentTripsFound ?? 0} sinceCutoff=${s.tripsSinceCutoff ?? 0} bodyText=${dbg.bodyTextLength ?? 0} timeEls=${dbg.timeElementCount ?? 0} loadingSeen=${dbg.sawLoadingText ? "yes" : "no"} maxLinksSeen=${dbg.maxTripLinksSeen ?? 0} loadMoreClicks=${dbg.loadMoreClicks ?? 0}${s.usedUrl ? ` url=${s.usedUrl}` : ""}${s.error ? ` error=${s.error}` : ""}`
+            );
+            if (dbg.bodySnippet) {
+              detailParts.push(`  snippet: ${dbg.bodySnippet}`);
+            }
+          }
+        }
+      }
+      if (detailParts.length > 0) {
+        verificationNoteDiv.style.display = "block";
+        verificationNoteDiv.textContent = detailParts.join("\n");
+      } else {
+        verificationNoteDiv.style.display = "none";
+        verificationNoteDiv.textContent = "";
+      }
 
       // Remove login button if not needed
       const existingBtn = document.getElementById("login-btn");
 
-      if (loginRequired) {
+      if (screenedOut) {
+        statusDiv.textContent = `⚠ Screened out (${screenOutReason || "verification_failed"}).`;
+        statusDiv.className = "login-warning";
+        if (existingBtn) existingBtn.remove();
+      } else if (prolificIdRequired) {
+        statusDiv.textContent = "⚠ Prolific ID required. Enter it in the opened setup tab.";
+        statusDiv.className = "login-warning";
+        if (existingBtn) existingBtn.remove();
+      } else if (loginRequired) {
         statusDiv.textContent = "⚠ Not logged in.";
         statusDiv.className = "login-warning";
         if (!existingBtn) {
@@ -46,17 +135,44 @@ document.addEventListener("DOMContentLoaded", () => {
           loginBtn.textContent = "Log in to Uber";
           loginBtn.style.cssText = "width:100%;padding:10px;margin-top:8px;margin-bottom:6px;cursor:pointer;font-size:14px;border:none;border-radius:4px;background:#2b6cb0;color:white;font-weight:600;";
           loginBtn.addEventListener("click", () => {
-            chrome.tabs.create({ url: chrome.runtime.getURL("login-required.html"), active: true });
+            chrome.tabs.create({ url: chrome.runtime.getURL("pages/login-required.html"), active: true });
           });
           statusDiv.after(loginBtn);
         }
+      } else if (profileVerificationFailed) {
+        const totalLocal = profileVerification?.totalLocalActions ?? 0;
+        const minActions = profileVerification?.minActions ?? 600;
+        const lookbackDays = profileVerification?.lookbackDays ?? 7;
+        const activeDays = profileVerification?.activeDays ?? 0;
+        const requiredActiveDays = profileVerification?.requiredActiveDays ?? 5;
+        const minPerActiveDay = profileVerification?.minActionsPerActiveDay ?? 120;
+        statusDiv.textContent = `⚠ Profile check failed: ${activeDays}/${requiredActiveDays} active days (>=${minPerActiveDay}/day) and ${totalLocal}/${minActions} local actions in last ${lookbackDays} days.`;
+        statusDiv.className = "login-warning";
+        if (existingBtn) existingBtn.remove();
+      } else if (tripHistoryVerificationFailed) {
+        const totalTrips = tripHistoryVerification?.totalTripsSinceCutoff ?? 0;
+        const minTrips = tripHistoryVerification?.minTripsRequired ?? 5;
+        const cutoffDate = tripHistoryVerification?.cutoffDateISO ?? "2025-03-01";
+        const summaries = tripHistoryVerification?.profileSummaries || [];
+        const fetchErrors = summaries.filter((s) => s && s.fetched === false);
+        const nonOk = summaries.filter((s) => s && s.fetched && s.httpOk === false);
+        let reason = "";
+        if (fetchErrors.length > 0) {
+          reason = " Could not fetch one or more trips pages.";
+        } else if (nonOk.length > 0) {
+          const statuses = nonOk.map((s) => `${s.profile}:${s.httpStatus}`).join(", ");
+          reason = ` Trips pages returned non-OK status (${statuses}).`;
+        }
+        statusDiv.textContent = `⚠ Uber trips check failed: found ${totalTrips}/${minTrips} trips since ${cutoffDate}.${reason}`;
+        statusDiv.className = "login-warning";
+        if (existingBtn) existingBtn.remove();
       } else if (running) {
         if (existingBtn) existingBtn.remove();
         // Find next upcoming trip for status display
         const searchingIdx = (tripStatuses || []).indexOf("searching");
         const nextPendingIdx = searchingIdx >= 0 ? searchingIdx : (tripStatuses || []).indexOf("pending");
         const nextTrip = nextPendingIdx >= 0 ? TRIP_SCHEDULE[nextPendingIdx] : null;
-        const nextLabel = nextTrip ? `next: ${nextTrip.utcTime} UTC` : "waiting…";
+        const nextLabel = nextTrip ? `next: ${formatLocalDateTime(nextTrip.runAtMs)} (local)` : "waiting…";
         statusDiv.textContent = `Running — ${nextLabel} | ${successCount} captured, ${pendingCount} remaining`;
         statusDiv.className = "";
       } else if (isDone) {
@@ -97,14 +213,14 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
     let html = '<div style="font-size:12px;color:#666;margin-bottom:6px;">';
-    html += `${TRIP_SCHEDULE.length} trips · ${TRIP_SCHEDULE[0].utcTime}–${TRIP_SCHEDULE[TRIP_SCHEDULE.length-1].utcTime} UTC`;
+    html += `${TRIP_SCHEDULE.length} trips · shown in your local time`;
     html += '</div>';
 
-    html += '<div class="trip-table-wrapper"><table><tr><th>Time (UTC)</th><th>Trip</th><th>Status</th></tr>';
+    html += '<div class="trip-table-wrapper"><table><tr><th>Time (Local)</th><th>Trip</th><th>Status</th></tr>';
     for (let i = 0; i < totalSlots; i++) {
       const ts = statuses[i] || "pending";
-      const sched = TRIP_SCHEDULE[i] || { utcTime: "??:??", label: "Unknown" };
-      const utcTime = sched.utcTime;
+      const sched = TRIP_SCHEDULE[i] || { runAtMs: null, label: "Unknown" };
+      const localTime = Number.isFinite(sched.runAtMs) ? formatLocalDateTime(sched.runAtMs) : "Unknown time";
       const label = sched.label;
       let statusText, cssClass;
       const isCurrent = (i === activeRow);
@@ -135,7 +251,7 @@ document.addEventListener("DOMContentLoaded", () => {
           cssClass = "pending";
       }
       const rowClass = isCurrent ? ' class="current-row"' : '';
-      html += `<tr${rowClass}><td>${utcTime}</td><td>${label}</td><td class="${cssClass}">${statusText}</td></tr>`;
+      html += `<tr${rowClass}><td>${localTime}</td><td>${label}</td><td class="${cssClass}">${statusText}</td></tr>`;
     }
     html += "</table></div>";
     // Preserve scroll position across refreshes
