@@ -8,3 +8,4 @@ Instructions:
 - You will be prompted to log into uber if you're not logged in
 - Rides will be searched from Apr 2-8
 - The partial/complete CSV with the price data will be available to download at any point
+- Optional: install the Keep Awake extension (https://chromewebstore.google.com/detail/keep-awake/bijihlabcfdnabacffofojgmehjdielb), pin it, and click the moon icon extension so it turns to sun. This will keep the browser awake more globally than the Uber extension.
