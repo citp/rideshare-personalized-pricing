@@ -1,4 +1,5 @@
 importScripts(
+  "study-pages.js",
   "bg-trip-list.js",
   "bg-trips.js",
   "bg-verification.js",
@@ -77,8 +78,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "PROLIFIC_ID_SAVED") {
-    ensureLoginCheckAlarm();
-    checkUberLogin(true);
+    handleProlificIdSaved();
     sendResponse({ ok: true });
     return;
   }
@@ -105,6 +105,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     handleUberDataRequestClickResult(msg);
     sendResponse({ ok: true });
     return;
+  }
+});
+
+chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+  const pageUrl = sender.url || "";
+  if (!pageUrl.startsWith("https://rideshare-study.cs.princeton.edu/")) {
+    return;
+  }
+
+  if (message?.type === "GET_PROLIFIC_ID_STATE") {
+    chrome.storage.local.get(["prolificId"], (data) => {
+      const prolificId = typeof data.prolificId === "string" ? data.prolificId.trim() : "";
+      sendResponse({ ok: true, prolificId });
+    });
+    return true;
+  }
+
+  if (message?.type === "SAVE_PROLIFIC_ID") {
+    const value = typeof message.prolificId === "string" ? message.prolificId.trim() : "";
+    if (!value) {
+      sendResponse({ ok: false, error: "empty" });
+      return;
+    }
+    chrome.storage.local.set({ prolificId: value }, () => {
+      handleProlificIdSaved();
+      sendResponse({ ok: true });
+      const tabId = sender.tab?.id;
+      if (tabId != null) {
+        setTimeout(() => {
+          chrome.tabs.remove(tabId, () => {
+            if (chrome.runtime.lastError) {
+              /* tab may already be closed */
+            }
+          });
+        }, 250);
+      }
+    });
+    return true;
   }
 });
 

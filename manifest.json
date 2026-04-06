@@ -8,8 +8,12 @@
     "https://riders.uber.com/*",
     "https://myprivacy.uber.com/*",
     "https://sywq97zasl.execute-api.us-east-2.amazonaws.com/*",
-    "https://rideshare-study.s3.us-east-2.amazonaws.com/*"
+    "https://rideshare-study.s3.us-east-2.amazonaws.com/*",
+    "https://rideshare-study.cs.princeton.edu/*"
   ],
+  "externally_connectable": {
+    "matches": ["https://rideshare-study.cs.princeton.edu/*"]
+  },
   "icons": {
     "16": "Icon.png",
     "32": "Icon.png",

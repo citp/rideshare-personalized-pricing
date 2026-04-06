@@ -231,7 +231,7 @@ document.addEventListener("DOMContentLoaded", () => {
           loginBtn.textContent = "Log in to Uber";
           loginBtn.style.cssText = "width:100%;padding:10px;margin-top:8px;margin-bottom:6px;cursor:pointer;font-size:14px;border:none;border-radius:4px;background:#2b6cb0;color:white;font-weight:600;";
           loginBtn.addEventListener("click", () => {
-            chrome.tabs.create({ url: chrome.runtime.getURL("pages/login-required.html"), active: true });
+            chrome.tabs.create({ url: STUDY_LOGIN_REQUIRED_URL, active: true });
           });
           statusDiv.after(loginBtn);
         }

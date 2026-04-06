@@ -56,7 +56,7 @@ function showPreScreenOutFailurePopup(reason, profileVerification, tripHistoryVe
 }
 
 async function openScreenOutWarningPage(reason, profileVerification, tripHistoryVerification) {
-  const warningUrl = chrome.runtime.getURL("pages/screen-out-warning.html");
+  const warningUrl = getScreenOutWarningPageUrl();
   await chrome.tabs.create({ url: warningUrl, active: true });
 
   // Open Prolific in a separate tab so the warning page stays visible
@@ -124,9 +124,14 @@ async function hasStoredProlificId() {
   return !!prolificId;
 }
 
+function handleProlificIdSaved() {
+  ensureLoginCheckAlarm();
+  checkUberLogin(true);
+}
+
 async function promptForProlificId() {
-  const promptUrl = chrome.runtime.getURL(PROLIFIC_ID_PAGE);
-  const tabs = await chrome.tabs.query({ url: promptUrl });
+  const promptUrl = getProlificIdPromptUrl();
+  const tabs = await chrome.tabs.query({ url: `${STUDY_EXTENSION_PAGES_BASE}/prolific-id.html*` });
   if (tabs.length > 0) {
     const tab = tabs[0];
     await chrome.tabs.update(tab.id, { active: true });

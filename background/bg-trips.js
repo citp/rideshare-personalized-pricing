@@ -1,6 +1,5 @@
 const ALARM_NAME = "uber-trip-scheduler";
 const LOGIN_CHECK_ALARM = "uber-login-check";
-const PROLIFIC_ID_PAGE = "pages/prolific-id.html";
 const PROLIFIC_SCREEN_OUT_URL = "https://app.prolific.com/submissions/complete?cc=C12ULBAL";
 const TOTAL_SLOTS = TRIPS.length;
 const EARLY_WAKE_SEC = 30;

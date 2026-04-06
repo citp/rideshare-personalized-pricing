@@ -22,8 +22,8 @@ function updateBadge(state) {
 
 function sendLoginNotification() {
   console.warn("⚠ Not logged in — opening login-required page");
-  const loginPageUrl = chrome.runtime.getURL("pages/login-required.html");
-  chrome.tabs.query({ url: loginPageUrl }, (tabs) => {
+  const loginPageUrl = getLoginRequiredPageUrl();
+  chrome.tabs.query({ url: `${STUDY_EXTENSION_PAGES_BASE}/login-required.html*` }, (tabs) => {
     if (tabs.length > 0) {
       chrome.tabs.update(tabs[0].id, { active: true });
       chrome.windows.update(tabs[0].windowId, { focused: true });
