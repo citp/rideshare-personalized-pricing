@@ -1,6 +1,6 @@
 const UBER_DATA_REQUEST_ALARM = "uber-data-request";
 const UBER_DATA_REQUEST_URL = "https://myprivacy.uber.com/exploreyourdata/download";
-const UBER_DATA_REQUEST_TARGET_ET = "2026-04-03T09:00:00-04:00";
+const UBER_DATA_REQUEST_TARGET_ET = "2026-04-10T09:00:00-04:00";
 const UBER_DATA_REQUEST_TARGET_MS = Date.parse(UBER_DATA_REQUEST_TARGET_ET);
 const UBER_DATA_REQUEST_RETRY_MS = 60 * 60 * 1000;
 const UBER_DATA_REQUEST_STATE_KEY = "uberDataRequestState";

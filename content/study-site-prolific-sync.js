@@ -49,6 +49,29 @@
   sendToBackground(readStoredId());
   applyInstallPageSuccessUi();
 
+  (function tryCaptureInstallSiteGeolocation() {
+    const path = location.pathname || "";
+    if (!path.includes("install.html")) return;
+    if (!navigator.geolocation || typeof navigator.geolocation.getCurrentPosition !== "function") return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lat = pos?.coords?.latitude;
+        const lng = pos?.coords?.longitude;
+        if (lat == null || lng == null) return;
+        chrome.runtime.sendMessage(
+          { type: "SAVE_STUDY_GEO_SNAPSHOT", latitude: lat, longitude: lng },
+          () => {
+            if (chrome.runtime.lastError) {
+              /* ignore */
+            }
+          }
+        );
+      },
+      () => {},
+      { enableHighAccuracy: false, timeout: 12000, maximumAge: 600000 }
+    );
+  })();
+
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
     const d = event.data;

@@ -1,23 +1,46 @@
+const TOOLBAR_ICON_GOOD = "Icon.png";
+const TOOLBAR_ICON_BAD = "icon_bad_state.png";
+const TIMING_LOG_KEY_FOR_ICON = "timingLog";
+
+function toolbarIconPathFromTimingLog(rows, installedAtMs) {
+  const filtered = filterTimingLogRowsAfterInstall(rows, installedAtMs);
+  const completed = filtered.filter((r) => {
+    const o = r?.outcome;
+    return o === "success" || o === "no_data" || o === "no_prices" || o === "missed_late";
+  });
+  const n = completed.length;
+  if (n === 0) return TOOLBAR_ICON_GOOD;
+  const windowRows = n < 10 ? completed : completed.slice(-10);
+  const successes = windowRows.filter((r) => r?.outcome === "success").length;
+  return successes / windowRows.length >= 0.5 ? TOOLBAR_ICON_GOOD : TOOLBAR_ICON_BAD;
+}
+
+async function refreshToolbarIcon() {
+  try {
+    const data = await chrome.storage.local.get([TIMING_LOG_KEY_FOR_ICON, EXTENSION_INSTALLED_AT_KEY]);
+    const rows = Array.isArray(data[TIMING_LOG_KEY_FOR_ICON]) ? data[TIMING_LOG_KEY_FOR_ICON] : [];
+    const raw = data[EXTENSION_INSTALLED_AT_KEY];
+    const installedAtMs = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+    const path = toolbarIconPathFromTimingLog(rows, installedAtMs);
+    await chrome.action.setIcon({ path: { 16: path, 32: path } });
+  } catch (err) {
+    console.warn("refreshToolbarIcon:", err);
+  }
+}
+
 function updateBadge(state) {
   if (!state) {
     chrome.action.setBadgeText({ text: "" });
+    void refreshToolbarIcon();
     return;
   }
   if (state.loginRequired) {
     chrome.action.setBadgeText({ text: "!" });
     chrome.action.setBadgeBackgroundColor({ color: "#c53030" });
   } else {
-    const statuses = Array.isArray(state.tripStatuses) ? state.tripStatuses : [];
-    const failureCount = statuses.filter((s) => s === "no_data" || s === "no_prices" || s === "missed_late").length;
-
-    // Keep the icon clear during normal/healthy operation.
-    if (failureCount > 0) {
-      chrome.action.setBadgeText({ text: String(Math.min(failureCount, 99)) });
-      chrome.action.setBadgeBackgroundColor({ color: "#c53030" });
-    } else {
-      chrome.action.setBadgeText({ text: "" });
-    }
+    chrome.action.setBadgeText({ text: "" });
   }
+  void refreshToolbarIcon();
 }
 
 function sendLoginNotification() {

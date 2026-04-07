@@ -40,6 +40,58 @@ const AWS_UPLOAD_MAX_ROWS_PER_FILE = 100;
 const APPROX_COORD_DECIMALS = 2;
 const SCHEDULER_ALARM_PREFIX = `${ALARM_NAME}:slot:`;
 const PREWARM_OFFSETS_MS = [5 * 60 * 1000, 3 * 60 * 1000, 90 * 1000, 30 * 1000];
+const STUDY_UBER_TAB_ID_KEY = "studyUberTabId";
+/** Install-time snapshot on study site; used only when trip-time Uber geolocation is unavailable. */
+const STUDY_GEO_SNAPSHOT_KEY = "studyGeoSnapshot";
+
+/** Serializes get/create so concurrent prewarm alarms cannot each open a new window. */
+let _studyUberMutex = Promise.resolve();
+
+function withStudyUberMutex(fn) {
+  const run = _studyUberMutex.then(() => fn());
+  _studyUberMutex = run.catch(() => {});
+  return run;
+}
+
+async function persistStudyUberTabId(tabId) {
+  await chrome.storage.local.set({ [STUDY_UBER_TAB_ID_KEY]: tabId });
+}
+
+/**
+ * Returns a single m.uber.com tab for the study: reuse stored id, any existing m.uber tab, or one new minimized window.
+ * Safe to call from prewarm and runTrip; concurrent calls are serialized.
+ */
+async function getOrCreateStudyUberTab() {
+  return withStudyUberMutex(async () => {
+    const data = await chrome.storage.local.get([STUDY_UBER_TAB_ID_KEY]);
+    const storedId = data[STUDY_UBER_TAB_ID_KEY];
+    if (typeof storedId === "number") {
+      try {
+        const tab = await chrome.tabs.get(storedId);
+        if (tab?.id != null && !tab.discarded) {
+          return { tabId: tab.id };
+        }
+      } catch (_) {}
+    }
+    const existing = await chrome.tabs.query({ url: "https://m.uber.com/*" });
+    const usable = existing.find((t) => t.id != null && !t.discarded) || existing.find((t) => t.id != null);
+    if (usable?.id != null) {
+      await persistStudyUberTabId(usable.id);
+      return { tabId: usable.id };
+    }
+    const win = await chrome.windows.create({
+      url: "https://m.uber.com/",
+      focused: false,
+      state: "minimized",
+    });
+    const tabId = win.tabs?.[0]?.id;
+    if (tabId == null) {
+      throw new Error("study_uber_window_missing_tab");
+    }
+    await persistStudyUberTabId(tabId);
+    return { tabId };
+  });
+}
 
 function sanitizeSchedulerConfig(raw) {
   const earlyWakeSecNum = Number(raw?.earlyWakeSec);
@@ -76,20 +128,9 @@ function parseSchedulerAlarmName(name) {
 
 async function ensureUberTabWarmup(nextSlot) {
   try {
-    const tabs = await chrome.tabs.query({ url: "https://m.uber.com/*" });
-    if (tabs.length === 0) {
-      await chrome.windows.create({
-        url: "https://m.uber.com/",
-        focused: false,
-        state: "minimized",
-      });
-      console.log(`🔥 Prewarm: created Uber tab for slot ${nextSlot}`);
-      return;
-    }
-    if (tabs[0]?.id) {
-      await chrome.tabs.update(tabs[0].id, { active: false });
-      console.log(`🔥 Prewarm: touched existing Uber tab for slot ${nextSlot}`);
-    }
+    const { tabId } = await getOrCreateStudyUberTab();
+    await chrome.tabs.update(tabId, { active: false });
+    console.log(`🔥 Prewarm: Uber tab ready for slot ${nextSlot}`);
   } catch (err) {
     console.warn("Prewarm failed:", err);
   }
@@ -147,16 +188,28 @@ function isFailedOutcome(outcome) {
 }
 
 function buildSearchHealth(rows) {
-  const completed = rows.filter((r) => isCompletedOutcome(r?.outcome)).slice(-FAILURE_WINDOW_SIZE);
-  const sampleSize = completed.length;
-  const failedCount = completed.filter((r) => isFailedOutcome(r?.outcome)).length;
-  const failureRate = sampleSize > 0 ? failedCount / sampleSize : 0;
+  const allCompleted = rows.filter((r) => isCompletedOutcome(r?.outcome));
+  const n = allCompleted.length;
+  if (n === 0) {
+    return {
+      sampleSize: 0,
+      failedCount: 0,
+      failureRate: 0,
+      threshold: FAILURE_RATE_THRESHOLD,
+      isFailing: false,
+    };
+  }
+  const windowRows = n < FAILURE_WINDOW_SIZE ? allCompleted : allCompleted.slice(-FAILURE_WINDOW_SIZE);
+  const sampleSize = windowRows.length;
+  const failedCount = windowRows.filter((r) => isFailedOutcome(r?.outcome)).length;
+  const failureRate = failedCount / sampleSize;
+  const successRate = 1 - failureRate;
   return {
     sampleSize,
     failedCount,
     failureRate,
     threshold: FAILURE_RATE_THRESHOLD,
-    isFailing: sampleSize >= FAILURE_WINDOW_SIZE && failureRate >= FAILURE_RATE_THRESHOLD,
+    isFailing: successRate < 0.5,
   };
 }
 
@@ -169,27 +222,137 @@ function buildAwsUploadBatches(rows, maxRowsPerBatch = AWS_UPLOAD_MAX_ROWS_PER_F
   return batches;
 }
 
+/** Lowercase alphanumeric only — words run together, no separators inside a place name. */
+function slugifyRideLocationSegment(segment) {
+  if (typeof segment !== "string") return "unknown";
+  const s = segment.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  return s.slice(0, 80) || "unknown";
+}
+
+function parseTripLabelForUploadFilename(label) {
+  if (typeof label !== "string" || !label.trim()) {
+    return { start: "unknown", end: "unknown" };
+  }
+  const parts = label.split(/\s*→\s*/);
+  if (parts.length >= 2) {
+    return {
+      start: slugifyRideLocationSegment(parts[0]),
+      end: slugifyRideLocationSegment(parts.slice(1).join(" ")),
+    };
+  }
+  const fallback = label.split(/\s*->\s*/);
+  if (fallback.length >= 2) {
+    return {
+      start: slugifyRideLocationSegment(fallback[0]),
+      end: slugifyRideLocationSegment(fallback.slice(1).join(" ")),
+    };
+  }
+  return { start: slugifyRideLocationSegment(label), end: "unknown" };
+}
+
+/** Local wall-clock yymmdd_hhmmss for upload filenames (not UTC). */
+function formatUploadFilenameTimestamp(d = new Date()) {
+  const yy = String(d.getFullYear()).slice(-2);
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${yy}${mm}${dd}_${hh}${mi}${ss}`;
+}
+
+function buildRideSearchUploadFileName({ trip, batchIndex, batchCount }) {
+  const { start, end } = parseTripLabelForUploadFilename(trip?.label);
+  const ts = formatUploadFilenameTimestamp();
+  const randomSeed = Math.random().toString(36).slice(2, 8);
+  return `ride_search_${start}_${end}_part_${batchIndex}_of_${batchCount}_${ts}_${randomSeed}.json`;
+}
+
+/** Rounded lat/lng for privacy; stored and uploaded as strings with fixed decimal places (default 2). */
 function toApproxCoordinate(value, decimals = APPROX_COORD_DECIMALS) {
   const num = Number(value);
   if (!Number.isFinite(num)) return "";
   const precision = Math.pow(10, decimals);
-  return Math.round(num * precision) / precision;
+  const rounded = Math.round(num * precision) / precision;
+  return rounded.toFixed(decimals);
 }
 
-async function getApproxBrowserLocationForCapture() {
+async function saveStudyGeoSnapshotFromInstall({ latitude, longitude }) {
+  const existing = await chrome.storage.local.get([STUDY_GEO_SNAPSHOT_KEY]);
+  const prev = existing[STUDY_GEO_SNAPSHOT_KEY];
+  if (prev?.approxUserLat && prev?.approxUserLng) {
+    return { ok: true, skipped: true };
+  }
+  const lat = toApproxCoordinate(latitude);
+  const lng = toApproxCoordinate(longitude);
+  if (!lat || !lng) {
+    return { ok: false, reason: "invalid_coords" };
+  }
+  await chrome.storage.local.set({
+    [STUDY_GEO_SNAPSHOT_KEY]: {
+      approxUserLat: lat,
+      approxUserLng: lng,
+      capturedAt: new Date().toISOString(),
+    },
+  });
+  return { ok: true };
+}
+
+async function tryGetLocationFromUberTab() {
   try {
-    const tabs = await chrome.tabs.query({ url: "https://m.uber.com/*" });
-    const uberTab = tabs[0];
-    if (!uberTab?.id) return { approxUserLat: "", approxUserLng: "", locationSource: "unavailable" };
+    const storage = await chrome.storage.local.get([STUDY_UBER_TAB_ID_KEY]);
+    let uberTabId = typeof storage[STUDY_UBER_TAB_ID_KEY] === "number" ? storage[STUDY_UBER_TAB_ID_KEY] : null;
+    if (uberTabId != null) {
+      try {
+        await chrome.tabs.get(uberTabId);
+      } catch (_) {
+        uberTabId = null;
+      }
+    }
+    if (uberTabId == null) {
+      const tabs = await chrome.tabs.query({ url: "https://m.uber.com/*" });
+      uberTabId = tabs[0]?.id ?? null;
+    }
+    if (uberTabId == null) return null;
 
-    const response = await chrome.tabs.sendMessage(uberTab.id, { type: "GET_BROWSER_LOCATION" });
-    if (!response?.ok) return { approxUserLat: "", approxUserLng: "", locationSource: "unavailable" };
-
+    const response = await chrome.tabs.sendMessage(uberTabId, { type: "GET_BROWSER_LOCATION" });
+    if (!response?.ok) return null;
+    const lat = toApproxCoordinate(response.latitude);
+    const lng = toApproxCoordinate(response.longitude);
+    if (!lat || !lng) return null;
     return {
-      approxUserLat: toApproxCoordinate(response.latitude),
-      approxUserLng: toApproxCoordinate(response.longitude),
+      approxUserLat: lat,
+      approxUserLng: lng,
       locationSource: "browser_geolocation",
     };
+  } catch (_) {
+    return null;
+  }
+}
+
+function locationFromStudyInstallSnapshot(snap) {
+  if (snap?.approxUserLat == null || snap?.approxUserLng == null) return null;
+  const alat = toApproxCoordinate(snap.approxUserLat);
+  const alng = toApproxCoordinate(snap.approxUserLng);
+  if (!alat || !alng) return null;
+  return {
+    approxUserLat: alat,
+    approxUserLng: alng,
+    locationSource: "study_install_snapshot",
+  };
+}
+
+/** Trip-time location from Uber tab when possible; else install snapshot; else unavailable. */
+async function getApproxBrowserLocationForCapture() {
+  try {
+    const live = await tryGetLocationFromUberTab();
+    if (live) return live;
+
+    const snapData = await chrome.storage.local.get([STUDY_GEO_SNAPSHOT_KEY]);
+    const fallback = locationFromStudyInstallSnapshot(snapData[STUDY_GEO_SNAPSHOT_KEY]);
+    if (fallback) return fallback;
+
+    return { approxUserLat: "", approxUserLng: "", locationSource: "unavailable" };
   } catch (_) {
     return { approxUserLat: "", approxUserLng: "", locationSource: "unavailable" };
   }
@@ -207,8 +370,11 @@ async function uploadSearchRowsToAws({ slot, trip, outcome, rows }) {
     let uploadedFiles = 0;
     for (let index = 0; index < batches.length; index++) {
       const batchRows = batches[index];
-      const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      const fileName = `price_search_slot_${slot}_part_${index + 1}_of_${batches.length}_${uniqueSuffix}.json`;
+      const fileName = buildRideSearchUploadFileName({
+        trip,
+        batchIndex: index + 1,
+        batchCount: batches.length,
+      });
 
       const signedRes = await fetch(AWS_UPLOAD_LAMBDA_URL, {
         method: "POST",
@@ -263,13 +429,16 @@ async function uploadSearchRowsToAws({ slot, trip, outcome, rows }) {
 }
 
 async function updateSearchHealthAndMaybeNotify(state) {
-  const data = await chrome.storage.local.get([TIMING_LOG_KEY, FAILURE_ALERT_LAST_DAY_KEY]);
+  const data = await chrome.storage.local.get([TIMING_LOG_KEY, FAILURE_ALERT_LAST_DAY_KEY, EXTENSION_INSTALLED_AT_KEY]);
   const rows = Array.isArray(data[TIMING_LOG_KEY]) ? data[TIMING_LOG_KEY] : [];
-  const health = buildSearchHealth(rows);
+  const rawInstalled = data[EXTENSION_INSTALLED_AT_KEY];
+  const installedAtMs = typeof rawInstalled === "number" && Number.isFinite(rawInstalled) ? rawInstalled : 0;
+  const filteredRows = filterTimingLogRowsAfterInstall(rows, installedAtMs);
+  const health = buildSearchHealth(filteredRows);
   state.searchHealth = health;
   await chrome.storage.local.set({ tripState: state });
 
-  if (!health.isFailing) return;
+  if (!health.isFailing || health.sampleSize < FAILURE_WINDOW_SIZE) return;
   const today = getLocalDayKey();
   if (data[FAILURE_ALERT_LAST_DAY_KEY] === today) return;
   sendSearchReliabilityWarningNotification(health);
@@ -431,8 +600,19 @@ async function onSlotAlarm(alarmName = ALARM_NAME) {
         console.log(`☁️ AWS upload complete for slot ${state.currentSlot}: ${awsResult.uploadedFiles} file(s)`);
       }
       try {
-        const tabs = await chrome.tabs.query({ url: "https://m.uber.com/*" });
-        if (tabs.length > 0 && !tabs[0].url.includes("product-selection")) {
+        const storage = await chrome.storage.local.get([STUDY_UBER_TAB_ID_KEY]);
+        let tab = null;
+        const sid = storage[STUDY_UBER_TAB_ID_KEY];
+        if (typeof sid === "number") {
+          try {
+            tab = await chrome.tabs.get(sid);
+          } catch (_) {}
+        }
+        if (!tab?.url?.includes("m.uber.com")) {
+          const tabs = await chrome.tabs.query({ url: "https://m.uber.com/*" });
+          tab = tabs[0] || null;
+        }
+        if (tab?.url && !tab.url.includes("product-selection")) {
           console.warn("⚠ Tab redirected — login required");
           await handleNotLoggedIn(state);
           return;
@@ -560,16 +740,8 @@ async function runTrip(state) {
     `&drop%5B0%5D=${encodeURIComponent(JSON.stringify(dropoffObj))}`;
 
   try {
-    const tabs = await chrome.tabs.query({ url: "https://m.uber.com/*" });
-    if (tabs.length > 0) {
-      await chrome.tabs.update(tabs[0].id, { url });
-    } else {
-      await chrome.windows.create({
-        url,
-        focused: false,
-        state: "minimized",
-      });
-    }
+    const { tabId } = await getOrCreateStudyUberTab();
+    await chrome.tabs.update(tabId, { url });
   } catch (err) {
     console.error("runTrip error:", err);
   }

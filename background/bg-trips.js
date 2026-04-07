@@ -26,3 +26,16 @@ function getCurrentTripIndex(now) {
   }
   return last;
 }
+
+const EXTENSION_INSTALLED_AT_KEY = "extensionInstalledAt";
+
+/** Timing-log rows for scheduled slots at or after extension install (by slot run time). */
+function filterTimingLogRowsAfterInstall(rows, installedAtMs) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!(installedAtMs > 0)) return list;
+  return list.filter((r) => {
+    const slot = r?.slot;
+    if (!Number.isFinite(slot) || slot < 0 || slot >= TRIPS.length) return false;
+    return TRIPS[slot].runAtMs >= installedAtMs;
+  });
+}

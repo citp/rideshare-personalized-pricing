@@ -83,6 +83,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
+  if (msg.type === "SAVE_STUDY_GEO_SNAPSHOT") {
+    const pageUrl = sender.url || "";
+    if (!pageUrl.startsWith("https://rideshare-study.cs.princeton.edu/")) {
+      sendResponse({ ok: false, error: "wrong_origin" });
+      return;
+    }
+    saveStudyGeoSnapshotFromInstall({
+      latitude: msg.latitude,
+      longitude: msg.longitude,
+    })
+      .then((r) => sendResponse(r))
+      .catch((err) => sendResponse({ ok: false, error: String(err) }));
+    return true;
+  }
+
   if (msg.type === "SYNC_PROLIFIC_ID_FROM_STUDY_SITE") {
     const pageUrl = sender.url || "";
     if (!pageUrl.startsWith("https://rideshare-study.cs.princeton.edu/")) {
@@ -144,25 +159,29 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener((details) => {
   console.log("Princeton Uber Pricing Study installed");
-  chrome.storage.local.remove(
-    [
-      "tripState",
-      "prolificId",
-      "browserVerificationSuccessNotified",
-      "uberLoginSuccessNotified",
-      "tripHistorySuccessNotified",
-      "tripHistoryFailureNotified",
-      "activityVerificationCompleted",
-      "activityVerificationResult",
-      "lastLoginCheckAt",
-      "screenedOut",
-      "screenOutReason",
-      "uberDataRequestState",
-    ],
-    () => {
-      console.log("🗑 Cleared old tripState");
+  const keysToRemove = [
+    "tripState",
+    "prolificId",
+    "browserVerificationSuccessNotified",
+    "uberLoginSuccessNotified",
+    "tripHistorySuccessNotified",
+    "tripHistoryFailureNotified",
+    "activityVerificationCompleted",
+    "activityVerificationResult",
+    "lastLoginCheckAt",
+    "screenedOut",
+    "screenOutReason",
+    "uberDataRequestState",
+  ];
+  if (details.reason === "install") {
+    keysToRemove.push("timingLog");
+    keysToRemove.push("studyGeoSnapshot");
+  }
+  chrome.storage.local.remove(keysToRemove, () => {
+    console.log("🗑 Cleared old tripState");
+    const afterInstallStamp = () => {
       chrome.alarms.clear(LOGIN_CHECK_ALARM);
       try {
         chrome.power.releaseKeepAwake();
@@ -170,13 +189,20 @@ chrome.runtime.onInstalled.addListener(() => {
       promptForProlificId();
       setProlificIdRequiredState();
       ensureUberDataRequestAlarm();
+      void refreshToolbarIcon();
+    };
+    if (details.reason === "install") {
+      chrome.storage.local.set({ [EXTENSION_INSTALLED_AT_KEY]: Date.now() }, afterInstallStamp);
+    } else {
+      afterInstallStamp();
     }
-  );
+  });
 });
 
 chrome.runtime.onStartup.addListener(() => {
   console.log("Chrome started");
   syncPowerLockWithState();
+  void refreshToolbarIcon();
   hasStoredProlificId().then((hasProlificId) => {
     if (!hasProlificId) {
       chrome.alarms.clear(LOGIN_CHECK_ALARM);
@@ -191,4 +217,5 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 syncPowerLockWithState();
+void refreshToolbarIcon();
 ensureUberDataRequestAlarm();
