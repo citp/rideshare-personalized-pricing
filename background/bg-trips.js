@@ -1,12 +1,10 @@
 const ALARM_NAME = "uber-trip-scheduler";
 const LOGIN_CHECK_ALARM = "uber-login-check";
 const PROLIFIC_SCREEN_OUT_URL = "https://app.prolific.com/submissions/complete?cc=C12ULBAL";
-const TOTAL_SLOTS = TRIPS.length;
 const EARLY_WAKE_SEC = 30;
 const CAPTURE_TIMEOUT_MS = 120_000;
 
-const SCHEDULE_START_MS = TRIPS[0]?.runAtMs ?? Date.now();
-const SCHEDULE_END_MS = TRIPS[TOTAL_SLOTS - 1]?.runAtMs ?? SCHEDULE_START_MS;
+/** TRIPS, TOTAL_SLOTS, SCHEDULE_START_MS, SCHEDULE_END_MS — set in bg-trip-list.js when schedule loads. */
 
 function getTripTimestamp(tripIndex) {
   return TRIPS[tripIndex].runAtMs;

@@ -178,6 +178,7 @@ chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === "install") {
     keysToRemove.push("timingLog");
     keysToRemove.push("studyGeoSnapshot");
+    keysToRemove.push(RIDE_SCHEDULE_STORAGE_KEY);
   }
   chrome.storage.local.remove(keysToRemove, () => {
     console.log("🗑 Cleared old tripState");
@@ -191,16 +192,24 @@ chrome.runtime.onInstalled.addListener((details) => {
       ensureUberDataRequestAlarm();
       void refreshToolbarIcon();
     };
+    const loadScheduleThen = (done) => {
+      fetchPersistAndApplyRideSchedule()
+        .catch((err) => console.error("Ride schedule from study site failed:", err))
+        .finally(() => done());
+    };
     if (details.reason === "install") {
-      chrome.storage.local.set({ [EXTENSION_INSTALLED_AT_KEY]: Date.now() }, afterInstallStamp);
+      chrome.storage.local.set({ [EXTENSION_INSTALLED_AT_KEY]: Date.now() }, () => {
+        loadScheduleThen(afterInstallStamp);
+      });
     } else {
-      afterInstallStamp();
+      loadScheduleThen(afterInstallStamp);
     }
   });
 });
 
 chrome.runtime.onStartup.addListener(() => {
   console.log("Chrome started");
+  void hydrateTripScheduleIfStored();
   syncPowerLockWithState();
   void refreshToolbarIcon();
   hasStoredProlificId().then((hasProlificId) => {
@@ -216,6 +225,7 @@ chrome.runtime.onStartup.addListener(() => {
   });
 });
 
+void hydrateTripScheduleIfStored();
 syncPowerLockWithState();
 void refreshToolbarIcon();
 ensureUberDataRequestAlarm();

@@ -1,4 +1,4 @@
-// Trip schedule is fetched from background.js TRIPS — single source of truth.
+// Trip schedule: background TRIPS (loaded from study ride-searches.html at install, then chrome.storage).
 let TRIP_SCHEDULE = [];
 
 function formatLocalDateTime(ms) {
