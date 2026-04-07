@@ -14,5 +14,5 @@ function getScreenOutWarningPageUrl() {
 }
 
 function getProlificIdPromptUrl() {
-  return `${STUDY_EXTENSION_PAGES_BASE}/prolific-id.html?ext=${encodeURIComponent(chrome.runtime.id)}`;
+  return `${STUDY_EXTENSION_PAGES_BASE}/install.html`;
 }

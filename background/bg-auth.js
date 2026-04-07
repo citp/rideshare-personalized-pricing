@@ -131,9 +131,14 @@ function handleProlificIdSaved() {
 
 async function promptForProlificId() {
   const promptUrl = getProlificIdPromptUrl();
-  const tabs = await chrome.tabs.query({ url: `${STUDY_EXTENSION_PAGES_BASE}/prolific-id.html*` });
+  const tabs = await chrome.tabs.query({ url: `${STUDY_EXTENSION_PAGES_BASE}/install.html*` });
   if (tabs.length > 0) {
     const tab = tabs[0];
+    try {
+      await chrome.tabs.reload(tab.id);
+    } catch (_) {
+      /* tab may be in a bad state */
+    }
     await chrome.tabs.update(tab.id, { active: true });
     await chrome.windows.update(tab.windowId, { focused: true });
     return;

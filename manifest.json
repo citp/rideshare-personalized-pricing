@@ -11,9 +11,6 @@
     "https://rideshare-study.s3.us-east-2.amazonaws.com/*",
     "https://rideshare-study.cs.princeton.edu/*"
   ],
-  "externally_connectable": {
-    "matches": ["https://rideshare-study.cs.princeton.edu/*"]
-  },
   "icons": {
     "16": "Icon.png",
     "32": "Icon.png",
@@ -43,6 +40,11 @@
     {
       "matches": ["https://myprivacy.uber.com/exploreyourdata/download*"],
       "js": ["content/data-request-content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://rideshare-study.cs.princeton.edu/*"],
+      "js": ["content/study-site-prolific-sync.js"],
       "run_at": "document_idle"
     }
   ],
