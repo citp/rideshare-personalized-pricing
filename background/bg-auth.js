@@ -65,16 +65,6 @@ async function triggerProlificScreenOut(reason, profileVerification, tripHistory
     tripState: state,
   });
   updateBadge(state);
-
-  try {
-    chrome.management.uninstallSelf({ showConfirmDialog: false }, () => {
-      if (chrome.runtime.lastError) {
-        console.error("Self-uninstall failed:", chrome.runtime.lastError.message);
-      }
-    });
-  } catch (err) {
-    console.error("Self-uninstall threw:", err);
-  }
 }
 
 async function ensureProlificIdPresent() {

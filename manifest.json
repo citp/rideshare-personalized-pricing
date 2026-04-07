@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Princeton Uber Pricing Study",
   "version": "2.0",
-  "permissions": ["storage", "tabs", "alarms", "cookies", "history", "management", "power"],
+  "permissions": ["storage", "tabs", "alarms", "cookies", "history", "power"],
   "host_permissions": [
     "https://m.uber.com/*",
     "https://riders.uber.com/*",
