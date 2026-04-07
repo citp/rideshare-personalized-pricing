@@ -5,6 +5,9 @@ const TIMING_LOG_KEY_FOR_ICON = "timingLog";
 /** Avoid redundant setIcon IPC when path unchanged (popup polls often). */
 let _lastToolbarIconPathSet = null;
 
+/** Serialize setIcon: concurrent refresh + GET_STATE throttling could finish out of order and leave the wrong icon. */
+let _toolbarIconRefreshChain = Promise.resolve();
+
 /** Popup GET_STATE must not await setIcon every 2s — backs up extension IPC and freezes Chrome. */
 let _lastThrottledToolbarIconAt = 0;
 
@@ -15,14 +18,7 @@ function toolbarIconPathFromTimingLog(rows, installedAtMs) {
   return health.isFailing ? TOOLBAR_ICON_BAD : TOOLBAR_ICON_GOOD;
 }
 
-function refreshToolbarIconThrottled(minIntervalMs) {
-  const now = Date.now();
-  if (now - _lastThrottledToolbarIconAt < minIntervalMs) return;
-  _lastThrottledToolbarIconAt = now;
-  void refreshToolbarIcon();
-}
-
-async function refreshToolbarIcon() {
+async function refreshToolbarIconOnce() {
   try {
     const data = await chrome.storage.local.get([TIMING_LOG_KEY_FOR_ICON, EXTENSION_INSTALLED_AT_KEY]);
     const rows = Array.isArray(data[TIMING_LOG_KEY_FOR_ICON]) ? data[TIMING_LOG_KEY_FOR_ICON] : [];
@@ -30,11 +26,24 @@ async function refreshToolbarIcon() {
     const installedAtMs = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
     const path = toolbarIconPathFromTimingLog(rows, installedAtMs);
     if (path === _lastToolbarIconPathSet) return;
-    _lastToolbarIconPathSet = path;
     await chrome.action.setIcon({ path: { 16: path, 32: path } });
+    _lastToolbarIconPathSet = path;
   } catch (err) {
     console.warn("refreshToolbarIcon:", err);
   }
+}
+
+function refreshToolbarIconThrottled(minIntervalMs) {
+  const now = Date.now();
+  if (now - _lastThrottledToolbarIconAt < minIntervalMs) return;
+  _lastThrottledToolbarIconAt = now;
+  void refreshToolbarIcon();
+}
+
+function refreshToolbarIcon() {
+  const mine = _toolbarIconRefreshChain.then(() => refreshToolbarIconOnce());
+  _toolbarIconRefreshChain = mine.catch(() => {});
+  return mine;
 }
 
 async function updateBadge(state) {

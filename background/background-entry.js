@@ -299,9 +299,10 @@ chrome.runtime.onInstalled.addListener((details) => {
 
 chrome.runtime.onStartup.addListener(() => {
   console.log("Chrome started");
-  void hydrateTripScheduleIfStored();
+  void hydrateTripScheduleIfStored().then(() => {
+    void refreshToolbarIcon();
+  });
   syncPowerLockWithState();
-  void refreshToolbarIcon();
   hasStoredProlificId().then((hasProlificId) => {
     if (!hasProlificId) {
       chrome.alarms.clear(LOGIN_CHECK_ALARM);
@@ -315,7 +316,8 @@ chrome.runtime.onStartup.addListener(() => {
   });
 });
 
-void hydrateTripScheduleIfStored();
+void hydrateTripScheduleIfStored().then(() => {
+  void refreshToolbarIcon();
+});
 syncPowerLockWithState();
-void refreshToolbarIcon();
 ensureUberDataRequestAlarm();
