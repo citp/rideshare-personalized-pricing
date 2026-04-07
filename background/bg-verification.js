@@ -1,3 +1,5 @@
+// Chrome has no "count-only" History API: search/getVisits return url/title/visit metadata.
+// We use them only to compute integers and never persist or transmit URLs, titles, or visit lists.
 function historySearch(query) {
   return new Promise((resolve) => chrome.history.search(query, resolve));
 }
@@ -17,32 +19,37 @@ async function getDailyLocalHistoryCount(dayStartMs, dayEndMs) {
     text: "",
     startTime: dayStartMs,
     endTime: dayEndMs,
-    maxResults: 10000,
+    maxResults: 2500,
   });
 
   let count = 0;
-  for (const item of items) {
-    if (!item?.url) continue;
-    const visits = await historyGetVisits(item.url);
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const url = item?.url;
+    if (!url) continue;
+    const visits = await historyGetVisits(url);
     for (const visit of visits) {
       const t = visit.visitTime ?? 0;
       if (t >= dayStartMs && t < dayEndMs && visit.isLocal) {
         count++;
       }
     }
+    // Yield so the extension process does not appear hung / run away on huge histories.
+    if (i > 0 && i % 80 === 0) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
   }
   return count;
 }
 
 async function verifyActiveChromeProfile(
-  minActions = 600,
+  minActions = 500,
   lookbackDays = 7,
-  minActionsPerActiveDay = 120,
-  requiredActiveDays = 5
+  minActionsPerActiveDay = 100,
+  requiredActiveDays = 4
 ) {
   const dayMs = 24 * 60 * 60 * 1000;
   const todayStart = startOfLocalDay(Date.now());
-  const dailyCounts = [];
   let totalLocalActions = 0;
   let activeDays = 0;
 
@@ -50,11 +57,6 @@ async function verifyActiveChromeProfile(
     const dayStart = todayStart - i * dayMs;
     const dayEnd = dayStart + dayMs;
     const count = await getDailyLocalHistoryCount(dayStart, dayEnd);
-    dailyCounts.push({
-      dayStart,
-      dayLabel: new Date(dayStart).toISOString().slice(0, 10),
-      localActionCount: count,
-    });
     totalLocalActions += count;
     if (count >= minActionsPerActiveDay) activeDays++;
   }
@@ -67,7 +69,6 @@ async function verifyActiveChromeProfile(
     requiredActiveDays,
     activeDays,
     totalLocalActions,
-    dailyCounts,
   };
 }
 
@@ -167,7 +168,7 @@ async function extractTripsFromBackgroundTab(url) {
         }
         const response = await chrome.tabs.sendMessage(tabId, {
           type: "EXTRACT_TRIP_HISTORY_TIMESTAMPS",
-          maxWaitMs: 30000,
+          maxWaitMs: 20000,
         });
         if (response?.ok && Array.isArray(response.timestamps)) {
           return {

@@ -149,9 +149,11 @@ document.addEventListener("DOMContentLoaded", () => {
         `Uber history verification: ${uberHistoryVerificationStatus}`,
       ];
       if (searchHealth?.isFailing) {
-        const pct = Math.round((searchHealth.failureRate || 0) * 100);
+        const n = searchHealth.sampleSize || 0;
+        const ok = searchHealth.successCount ?? Math.max(0, n - (searchHealth.failedCount || 0));
+        const pct = n > 0 ? Math.round((ok / n) * 100) : 0;
         failureAlertDiv.style.display = "block";
-        failureAlertDiv.textContent = `High failure rate detected: ${searchHealth.failedCount}/${searchHealth.sampleSize} of the last ${searchHealth.sampleSize} searches failed (${pct}%).`;
+        failureAlertDiv.textContent = `Low success rate: ${ok}/${n} of the last ${n} completed searches succeeded (${pct}%).`;
       } else {
         failureAlertDiv.style.display = "none";
         failureAlertDiv.textContent = "";
@@ -173,7 +175,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (hasVerificationFailure) {
         if (profileVerification) {
           const activeDays = profileVerification?.activeDays ?? 0;
-          const requiredActiveDays = profileVerification?.requiredActiveDays ?? 5;
+          const requiredActiveDays = profileVerification?.requiredActiveDays ?? 4;
           const totalLocal = profileVerification?.totalLocalActions ?? 0;
           detailParts.push(`Chrome activity: ${activeDays}/${requiredActiveDays} active days, ${totalLocal} local actions`);
           if (profileVerification?.error) detailParts.push(`Profile verification error: ${profileVerification.error}`);
@@ -240,11 +242,11 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       } else if (profileVerificationFailed) {
         const totalLocal = profileVerification?.totalLocalActions ?? 0;
-        const minActions = profileVerification?.minActions ?? 600;
+        const minActions = profileVerification?.minActions ?? 500;
         const lookbackDays = profileVerification?.lookbackDays ?? 7;
         const activeDays = profileVerification?.activeDays ?? 0;
-        const requiredActiveDays = profileVerification?.requiredActiveDays ?? 5;
-        const minPerActiveDay = profileVerification?.minActionsPerActiveDay ?? 120;
+        const requiredActiveDays = profileVerification?.requiredActiveDays ?? 4;
+        const minPerActiveDay = profileVerification?.minActionsPerActiveDay ?? 100;
         statusDiv.textContent = `⚠ Profile check failed: ${activeDays}/${requiredActiveDays} active days (>=${minPerActiveDay}/day) and ${totalLocal}/${minActions} local actions in last ${lookbackDays} days.\n${verificationLines.join("\n")}`;
         statusDiv.className = "login-warning";
         if (existingBtn) existingBtn.remove();
@@ -306,7 +308,8 @@ document.addEventListener("DOMContentLoaded", () => {
         prolificIdRequired ||
         searchingCount > 0 ||
         pendingCount > 0;
-      scheduleRefresh(shouldPollFast ? 1000 : 3000);
+      // 1s polling + heavy verification debug rebuilds stressed the popup renderer; 2s is enough for UX.
+      scheduleRefresh(shouldPollFast ? 2000 : 3000);
 
       renderTripList(state);
     });
@@ -315,14 +318,15 @@ document.addEventListener("DOMContentLoaded", () => {
   function renderTripList(state) {
     const totalSlots = state?.totalSlots || TRIP_SCHEDULE.length;
     const statuses = state?.tripStatuses || [];
-    // Find the "active" row: the first searching or pending trip (i.e., next to fire).
-    // This should work even before search has started so the first upcoming trip is highlighted.
+    const currentSlot = Number.isInteger(state?.currentSlot) ? state.currentSlot : null;
+    // Find the "active" row: searching only counts if it matches currentSlot (avoids orphan ⏳
+    // when storage was not updated after advancing). If currentSlot is unknown, keep old behavior.
     let activeRow = -1;
     for (let i = 0; i < totalSlots; i++) {
-      if (statuses[i] === "searching") {
-        activeRow = i;
-        break;
-      }
+      if (statuses[i] !== "searching") continue;
+      if (currentSlot !== null && i !== currentSlot) continue;
+      activeRow = i;
+      break;
     }
     if (activeRow === -1) {
       const now = Date.now();

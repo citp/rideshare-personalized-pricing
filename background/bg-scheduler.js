@@ -184,6 +184,7 @@ function buildSearchHealth(rows) {
   if (n === 0) {
     return {
       sampleSize: 0,
+      successCount: 0,
       failedCount: 0,
       failureRate: 0,
       threshold: FAILURE_RATE_THRESHOLD,
@@ -193,10 +194,12 @@ function buildSearchHealth(rows) {
   const windowRows = n < FAILURE_WINDOW_SIZE ? allCompleted : allCompleted.slice(-FAILURE_WINDOW_SIZE);
   const sampleSize = windowRows.length;
   const failedCount = windowRows.filter((r) => isFailedOutcome(r?.outcome)).length;
+  const successCount = sampleSize - failedCount;
   const failureRate = failedCount / sampleSize;
-  const successRate = 1 - failureRate;
+  const successRate = successCount / sampleSize;
   return {
     sampleSize,
+    successCount,
     failedCount,
     failureRate,
     threshold: FAILURE_RATE_THRESHOLD,
@@ -476,7 +479,7 @@ async function handleNotLoggedIn(state) {
       startTime: now,
     };
     await chrome.storage.local.set({ tripState: state });
-    updateBadge(state);
+    await updateBadge(state);
     sendLoginNotification();
     return;
   }
@@ -487,7 +490,7 @@ async function handleNotLoggedIn(state) {
     chrome.alarms.clear(ALARM_NAME);
     releaseSearchKeepAwake();
     await chrome.storage.local.set({ tripState: state });
-    updateBadge(state);
+    await updateBadge(state);
     sendLoginNotification();
     return;
   }
@@ -495,7 +498,7 @@ async function handleNotLoggedIn(state) {
   if (!state.loginRequired) {
     state.loginRequired = true;
     await chrome.storage.local.set({ tripState: state });
-    updateBadge(state);
+    await updateBadge(state);
     sendLoginNotification();
   }
 }
@@ -533,7 +536,7 @@ async function startSearch() {
 
   await chrome.storage.local.set({ tripState: state });
   requestSearchKeepAwake();
-  updateBadge(state);
+  await updateBadge(state);
 
   if (nextSlot >= TOTAL_SLOTS) {
     markDayComplete(state);
@@ -603,6 +606,9 @@ async function onSlotAlarm(alarmName = ALARM_NAME) {
           return;
         }
       } catch (_) {}
+      // Must persist before the fresh read below; otherwise storage still has "searching"
+      // and the next block overwrites this fix (orphan ⏳ row + wrong popup highlight).
+      await chrome.storage.local.set({ tripState: state });
     }
 
     if (Date.now() >= state.endTime) {
@@ -657,7 +663,7 @@ async function onSlotAlarm(alarmName = ALARM_NAME) {
           prolificId,
         });
         await updateSearchHealthAndMaybeNotify(s);
-        updateBadge(s);
+        await updateBadge(s);
         await scheduleNextSlot(s);
         console.warn(`⚠ Skipped slot ${nextSlot} as late by ${driftMs}ms (threshold ${cfg.lateFireGraceMs}ms)`);
         return;
@@ -675,7 +681,7 @@ async function onSlotAlarm(alarmName = ALARM_NAME) {
         thresholdMs: cfg.lateFireGraceMs,
       });
       await chrome.storage.local.set({ tripState: s });
-      updateBadge(s);
+      await updateBadge(s);
       runTrip(s);
       await scheduleNextSlot(s);
     } finally {
@@ -683,6 +689,27 @@ async function onSlotAlarm(alarmName = ALARM_NAME) {
     }
   } catch (err) {
     console.error("onSlotAlarm error:", err);
+  }
+}
+
+/**
+ * When the scheduler advanced currentSlot but a prior slot stayed "searching" in storage
+ * (e.g. cleanup was not persisted before the next alarm saved), normalize for UI and counts.
+ */
+async function repairOrphanSearchingTripStatuses(state) {
+  if (!state?.running || !Number.isInteger(state.currentSlot)) return;
+  const cur = state.currentSlot;
+  const statuses = state.tripStatuses;
+  if (!Array.isArray(statuses)) return;
+  let changed = false;
+  for (let i = 0; i < statuses.length; i++) {
+    if (statuses[i] === "searching" && i !== cur) {
+      statuses[i] = "no_data";
+      changed = true;
+    }
+  }
+  if (changed) {
+    await chrome.storage.local.set({ tripState: state });
   }
 }
 
@@ -694,7 +721,7 @@ async function markDayComplete(state) {
     }
   }
   await chrome.storage.local.set({ tripState: state });
-  updateBadge(state);
+  await updateBadge(state);
   chrome.alarms.clear(ALARM_NAME);
   releaseSearchKeepAwake();
   const successCount = state.tripStatuses.filter((s) => s === "success").length;
@@ -763,7 +790,7 @@ async function runTrip(state) {
           prolificId,
         });
         await updateSearchHealthAndMaybeNotify(s);
-        updateBadge(s);
+        await updateBadge(s);
       }
     } catch (e) {
       console.error("Capture timeout error:", e);
@@ -915,7 +942,7 @@ async function handleProductsCapture(productsData) {
     }
 
     await chrome.storage.local.set({ tripState: state });
-    updateBadge(state);
+    await updateBadge(state);
   } finally {
     _captureSlotsInProgress.delete(slot);
   }

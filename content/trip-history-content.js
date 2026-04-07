@@ -139,14 +139,18 @@
   }
 
   async function waitForTripData(maxWaitMs) {
+    collected.clear();
+    const maxHtmlScan = 1_500_000;
     const start = Date.now();
     let sawLoadingText = false;
     let maxTripLinksSeen = 0;
     let lastBodySnippet = "";
     let loadMoreClicks = 0;
+    let tick = 0;
+    // Full document.outerHTML is huge on Uber; parsing it every tick can OOM/crash the renderer.
+    const pollIntervalMs = 750;
     while (Date.now() - start < maxWaitMs) {
-      const html = document.documentElement?.outerHTML || "";
-      extractTripDateCandidates(html);
+      tick++;
       const bodyText = document.body?.innerText || "";
       if (bodyText.includes("Loading")) sawLoadingText = true;
       lastBodySnippet = bodyText.replace(/\s+/g, " ").trim().slice(0, 220);
@@ -157,6 +161,11 @@
         .map((el) => el.getAttribute("datetime") || el.textContent || "")
         .join(" ");
       extractDateCandidatesFromText(fromTimeEls);
+      // Re-scan full HTML only occasionally (embedded JSON dates); rest of loop uses text/time/links.
+      if (tick === 1 || tick % 3 === 0) {
+        const html = document.documentElement?.outerHTML || "";
+        extractTripDateCandidates(html.length > maxHtmlScan ? html.slice(0, maxHtmlScan) : html);
+      }
       const deduped = Array.from(collected).sort((a, b) => b - a);
       if (deduped.length >= 3 || linksNow.length >= 5) {
         return { timestamps: deduped, sawLoadingText, maxTripLinksSeen, lastBodySnippet, loadMoreClicks };
@@ -165,10 +174,10 @@
         loadMoreClicks++;
       }
       try { window.scrollTo(0, document.body?.scrollHeight || 0); } catch (_) {}
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
     const html = document.documentElement?.outerHTML || "";
-    extractTripDateCandidates(html);
+    extractTripDateCandidates(html.length > maxHtmlScan ? html.slice(0, maxHtmlScan) : html);
     const bodyText = document.body?.innerText || "";
     if (bodyText.includes("Loading")) sawLoadingText = true;
     lastBodySnippet = bodyText.replace(/\s+/g, " ").trim().slice(0, 220);

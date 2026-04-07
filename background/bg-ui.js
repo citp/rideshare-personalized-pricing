@@ -2,17 +2,24 @@ const TOOLBAR_ICON_GOOD = "Icon.png";
 const TOOLBAR_ICON_BAD = "icon_bad_state.png";
 const TIMING_LOG_KEY_FOR_ICON = "timingLog";
 
+/** Avoid redundant setIcon IPC when path unchanged (popup polls often). */
+let _lastToolbarIconPathSet = null;
+
+/** Popup GET_STATE must not await setIcon every 2s — backs up extension IPC and freezes Chrome. */
+let _lastThrottledToolbarIconAt = 0;
+
 function toolbarIconPathFromTimingLog(rows, installedAtMs) {
   const filtered = filterTimingLogRowsAfterInstall(rows, installedAtMs);
-  const completed = filtered.filter((r) => {
-    const o = r?.outcome;
-    return o === "success" || o === "no_data" || o === "no_prices" || o === "missed_late";
-  });
-  const n = completed.length;
-  if (n === 0) return TOOLBAR_ICON_GOOD;
-  const windowRows = n < 10 ? completed : completed.slice(-10);
-  const successes = windowRows.filter((r) => r?.outcome === "success").length;
-  return successes / windowRows.length >= 0.5 ? TOOLBAR_ICON_GOOD : TOOLBAR_ICON_BAD;
+  const health = buildSearchHealth(filtered);
+  if (health.sampleSize === 0) return TOOLBAR_ICON_GOOD;
+  return health.isFailing ? TOOLBAR_ICON_BAD : TOOLBAR_ICON_GOOD;
+}
+
+function refreshToolbarIconThrottled(minIntervalMs) {
+  const now = Date.now();
+  if (now - _lastThrottledToolbarIconAt < minIntervalMs) return;
+  _lastThrottledToolbarIconAt = now;
+  void refreshToolbarIcon();
 }
 
 async function refreshToolbarIcon() {
@@ -22,16 +29,18 @@ async function refreshToolbarIcon() {
     const raw = data[EXTENSION_INSTALLED_AT_KEY];
     const installedAtMs = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
     const path = toolbarIconPathFromTimingLog(rows, installedAtMs);
+    if (path === _lastToolbarIconPathSet) return;
+    _lastToolbarIconPathSet = path;
     await chrome.action.setIcon({ path: { 16: path, 32: path } });
   } catch (err) {
     console.warn("refreshToolbarIcon:", err);
   }
 }
 
-function updateBadge(state) {
+async function updateBadge(state) {
   if (!state) {
     chrome.action.setBadgeText({ text: "" });
-    void refreshToolbarIcon();
+    await refreshToolbarIcon();
     return;
   }
   if (state.loginRequired) {
@@ -40,7 +49,9 @@ function updateBadge(state) {
   } else {
     chrome.action.setBadgeText({ text: "" });
   }
-  void refreshToolbarIcon();
+  // Must await: MV3 service workers can terminate before a fire-and-forget promise finishes,
+  // so chrome.action.setIcon would never run.
+  await refreshToolbarIcon();
 }
 
 function sendLoginNotification() {

@@ -64,7 +64,7 @@ async function triggerProlificScreenOut(reason, profileVerification, tripHistory
     screenOutReason: reason,
     tripState: state,
   });
-  updateBadge(state);
+  await updateBadge(state);
 }
 
 async function ensureProlificIdPresent() {
@@ -80,9 +80,15 @@ async function hasStoredProlificId() {
   return !!prolificId;
 }
 
+let _prolificIdSavedDebounceTimer = null;
+
 function handleProlificIdSaved() {
-  ensureLoginCheckAlarm();
-  checkUberLogin();
+  void ensureLoginCheckAlarm();
+  if (_prolificIdSavedDebounceTimer != null) clearTimeout(_prolificIdSavedDebounceTimer);
+  _prolificIdSavedDebounceTimer = setTimeout(() => {
+    _prolificIdSavedDebounceTimer = null;
+    checkUberLogin();
+  }, 2500);
 }
 
 async function promptForProlificId() {
@@ -123,7 +129,7 @@ async function setProlificIdRequiredState() {
     startTime: now,
   };
   await chrome.storage.local.set({ tripState: state });
-  updateBadge(state);
+  await updateBadge(state);
 }
 
 async function clearProlificIdRequiredState() {
@@ -132,7 +138,7 @@ async function clearProlificIdRequiredState() {
   if (!state || !state.prolificIdRequired) return;
   state.prolificIdRequired = false;
   await chrome.storage.local.set({ tripState: state });
-  updateBadge(state);
+  await updateBadge(state);
 }
 
 async function ensureLoginCheckAlarm() {
@@ -145,7 +151,17 @@ async function ensureLoginCheckAlarm() {
   chrome.alarms.create(LOGIN_CHECK_ALARM, { when });
 }
 
-async function checkUberLogin() {
+/** Serialize login checks: overlapping runs stack history + Uber tab work and can freeze Chrome. */
+let _checkUberLoginChain = Promise.resolve();
+
+function checkUberLogin() {
+  _checkUberLoginChain = _checkUberLoginChain.then(
+    () => runCheckUberLogin(),
+    () => runCheckUberLogin()
+  );
+}
+
+async function runCheckUberLogin() {
   const checkStartedAt = Date.now();
   try {
     const hasProlificId = await ensureProlificIdPresent();
@@ -176,19 +192,24 @@ async function checkUberLogin() {
         ? activityVerificationResult
         : {
             passed: true,
-            minActions: 600,
+            minActions: 500,
             lookbackDays: 7,
-            minActionsPerActiveDay: 120,
-            requiredActiveDays: 5,
-            activeDays: 5,
-            totalLocalActions: 600,
-            dailyCounts: [],
+            minActionsPerActiveDay: 100,
+            requiredActiveDays: 4,
+            activeDays: 4,
+            totalLocalActions: 500,
           };
       activityVerificationCompleted = true;
       activityVerificationResult = profileVerification;
     } else if (activityVerificationCompleted && activityVerificationResult) {
       profileVerification = activityVerificationResult;
     } else {
+      const installMeta = await chrome.storage.local.get([EXTENSION_INSTALLED_AT_KEY]);
+      const installedAt =
+        typeof installMeta[EXTENSION_INSTALLED_AT_KEY] === "number" ? installMeta[EXTENSION_INSTALLED_AT_KEY] : 0;
+      if (installedAt > 0 && Date.now() - installedAt < 4 * 60_000) {
+        await wait(8000);
+      }
       try {
         profileVerification = await verifyActiveChromeProfile();
       } catch (err) {
@@ -196,13 +217,12 @@ async function checkUberLogin() {
         profileVerification = {
           passed: false,
           error: String(err),
-          minActions: 600,
+          minActions: 500,
           lookbackDays: 7,
-          minActionsPerActiveDay: 120,
-          requiredActiveDays: 5,
+          minActionsPerActiveDay: 100,
+          requiredActiveDays: 4,
           activeDays: 0,
           totalLocalActions: 0,
-          dailyCounts: [],
         };
       }
       activityVerificationCompleted = true;
@@ -232,6 +252,7 @@ async function checkUberLogin() {
     };
 
     if (hasSession && !eligibilityVerified) {
+      await wait(1500);
       try {
         tripHistoryVerification = await verifyUberTripHistory("2025-03-01", 5);
       } catch (err) {
@@ -291,7 +312,7 @@ async function checkUberLogin() {
         if (!tripHistoryVerification.passed) {
           return;
         }
-        startSearch();
+        await startSearch();
       } else if (workingState.loginRequired) {
         if (!tripHistoryVerification.passed) {
           return;
@@ -314,15 +335,15 @@ async function checkUberLogin() {
         workingState.currentSlot = nextSlot - 1;
         workingState.capturedForCurrent = true;
         await chrome.storage.local.set({ tripState: workingState });
-        updateBadge(workingState);
+        await updateBadge(workingState);
         if (nextSlot >= TOTAL_SLOTS) {
-          markDayComplete(workingState);
+          await markDayComplete(workingState);
         } else {
           await scheduleNextSlot(workingState);
           console.log(`✅ Login detected — next trip at ${TRIPS[nextSlot].scheduledISO}`);
         }
       } else if (workingState.running) {
-        scheduleNextSlot(workingState);
+        await scheduleNextSlot(workingState);
       } else {
         // Verified + logged in, but idle state exists (e.g. setup state). Start scheduler now.
         if (!tripHistoryVerification.passed) {
