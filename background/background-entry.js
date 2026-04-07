@@ -71,7 +71,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           });
         return;
       }
-      checkUberLogin(false);
+      checkUberLogin();
       sendResponse({ ok: true });
     });
     return true;
@@ -164,10 +164,6 @@ chrome.runtime.onInstalled.addListener((details) => {
   const keysToRemove = [
     "tripState",
     "prolificId",
-    "browserVerificationSuccessNotified",
-    "uberLoginSuccessNotified",
-    "tripHistorySuccessNotified",
-    "tripHistoryFailureNotified",
     "activityVerificationCompleted",
     "activityVerificationResult",
     "lastLoginCheckAt",

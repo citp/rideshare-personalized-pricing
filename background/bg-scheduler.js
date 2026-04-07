@@ -28,7 +28,6 @@ function buildBlockedState(profileVerification, tripHistoryVerification) {
 
 const SCHEDULER_CONFIG_KEY = "schedulerConfig";
 const TIMING_LOG_KEY = "timingLog";
-const FAILURE_ALERT_LAST_DAY_KEY = "failureAlertLastDay";
 const DEFAULT_EARLY_WAKE_SEC = 180;
 const DEFAULT_LATE_FIRE_GRACE_MS = 30000;
 const MAX_TIMING_LOG_ROWS = 2000;
@@ -169,14 +168,6 @@ function upsertSlotMetric(state, slot, patch) {
     state.timingMetrics.push(merged);
   }
   return merged;
-}
-
-function getLocalDayKey(ms = Date.now()) {
-  const d = new Date(ms);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
 }
 
 function isCompletedOutcome(outcome) {
@@ -429,7 +420,7 @@ async function uploadSearchRowsToAws({ slot, trip, outcome, rows }) {
 }
 
 async function updateSearchHealthAndMaybeNotify(state) {
-  const data = await chrome.storage.local.get([TIMING_LOG_KEY, FAILURE_ALERT_LAST_DAY_KEY, EXTENSION_INSTALLED_AT_KEY]);
+  const data = await chrome.storage.local.get([TIMING_LOG_KEY, EXTENSION_INSTALLED_AT_KEY]);
   const rows = Array.isArray(data[TIMING_LOG_KEY]) ? data[TIMING_LOG_KEY] : [];
   const rawInstalled = data[EXTENSION_INSTALLED_AT_KEY];
   const installedAtMs = typeof rawInstalled === "number" && Number.isFinite(rawInstalled) ? rawInstalled : 0;
@@ -437,12 +428,6 @@ async function updateSearchHealthAndMaybeNotify(state) {
   const health = buildSearchHealth(filteredRows);
   state.searchHealth = health;
   await chrome.storage.local.set({ tripState: state });
-
-  if (!health.isFailing || health.sampleSize < FAILURE_WINDOW_SIZE) return;
-  const today = getLocalDayKey();
-  if (data[FAILURE_ALERT_LAST_DAY_KEY] === today) return;
-  sendSearchReliabilityWarningNotification(health);
-  await chrome.storage.local.set({ [FAILURE_ALERT_LAST_DAY_KEY]: today });
 }
 
 function requestSearchKeepAwake() {

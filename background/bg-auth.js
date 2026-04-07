@@ -24,37 +24,6 @@ function computeNextLoginCheckWhen(now, lastLoginCheckAt) {
   return null;
 }
 
-function buildScreenOutFailureMessage(reason, profileVerification, tripHistoryVerification) {
-  if (reason === "chrome_activity_failed") {
-    const activeDays = profileVerification?.activeDays ?? 0;
-    const requiredActiveDays = profileVerification?.requiredActiveDays ?? 5;
-    const totalLocal = profileVerification?.totalLocalActions ?? 0;
-    const minActions = profileVerification?.minActions ?? 600;
-    return `Chrome activity check failed (${activeDays}/${requiredActiveDays} active days; ${totalLocal}/${minActions} local actions). Redirecting to Prolific screen-out.`;
-  }
-
-  if (reason === "uber_history_failed") {
-    const totalTrips = tripHistoryVerification?.totalTripsSinceCutoff ?? 0;
-    const minTrips = tripHistoryVerification?.minTripsRequired ?? 5;
-    const cutoff = tripHistoryVerification?.cutoffDateISO ?? "2025-03-01";
-    return `Uber trips check failed (${totalTrips}/${minTrips} trips since ${cutoff}). Redirecting to Prolific screen-out.`;
-  }
-
-  return "Verification check failed. Redirecting to Prolific screen-out.";
-}
-
-function showPreScreenOutFailurePopup(reason, profileVerification, tripHistoryVerification) {
-  return new Promise((resolve) => {
-    chrome.notifications.create({
-      type: "basic",
-      iconUrl: "Icon.png",
-      title: "Verification failed",
-      message: buildScreenOutFailureMessage(reason, profileVerification, tripHistoryVerification),
-      priority: 2,
-    }, () => resolve());
-  });
-}
-
 async function openScreenOutWarningPage(reason, profileVerification, tripHistoryVerification) {
   const warningUrl = getScreenOutWarningPageUrl();
   await chrome.tabs.create({ url: warningUrl, active: true });
@@ -67,9 +36,6 @@ async function openScreenOutWarningPage(reason, profileVerification, tripHistory
   } catch (err) {
     console.warn("Could not open Prolific screen-out tab:", err);
   }
-
-  // Keep a visible signal in case notifications are enabled.
-  await showPreScreenOutFailurePopup(reason, profileVerification, tripHistoryVerification);
 }
 
 async function triggerProlificScreenOut(reason, profileVerification, tripHistoryVerification) {
@@ -126,7 +92,7 @@ async function hasStoredProlificId() {
 
 function handleProlificIdSaved() {
   ensureLoginCheckAlarm();
-  checkUberLogin(true);
+  checkUberLogin();
 }
 
 async function promptForProlificId() {
@@ -189,7 +155,7 @@ async function ensureLoginCheckAlarm() {
   chrome.alarms.create(LOGIN_CHECK_ALARM, { when });
 }
 
-async function checkUberLogin(forceNotify = false) {
+async function checkUberLogin() {
   const checkStartedAt = Date.now();
   try {
     const hasProlificId = await ensureProlificIdPresent();
@@ -201,26 +167,16 @@ async function checkUberLogin(forceNotify = false) {
 
     const stored = await chrome.storage.local.get([
       "tripState",
-      "browserVerificationSuccessNotified",
-      "uberLoginSuccessNotified",
-      "tripHistorySuccessNotified",
-      "tripHistoryFailureNotified",
       "activityVerificationCompleted",
       "activityVerificationResult",
       "eligibilityVerified",
       "screenedOut",
     ]);
     const state = stored.tripState;
-    let browserVerificationSuccessNotified = !!stored.browserVerificationSuccessNotified;
-    let uberLoginSuccessNotified = !!stored.uberLoginSuccessNotified;
-    let tripHistorySuccessNotified = !!stored.tripHistorySuccessNotified;
-    let tripHistoryFailureNotified = !!stored.tripHistoryFailureNotified;
     let activityVerificationCompleted = !!stored.activityVerificationCompleted;
     let activityVerificationResult = stored.activityVerificationResult || null;
     const eligibilityVerified = !!stored.eligibilityVerified;
     const screenedOut = !!stored.screenedOut;
-    let justNotifiedBrowserCheck = false;
-    let justNotifiedUberLogin = false;
 
     if (screenedOut) return;
 
@@ -240,7 +196,6 @@ async function checkUberLogin(forceNotify = false) {
           };
       activityVerificationCompleted = true;
       activityVerificationResult = profileVerification;
-      browserVerificationSuccessNotified = true;
     } else if (activityVerificationCompleted && activityVerificationResult) {
       profileVerification = activityVerificationResult;
     } else {
@@ -264,14 +219,7 @@ async function checkUberLogin(forceNotify = false) {
       activityVerificationResult = profileVerification;
     }
 
-    if (profileVerification.passed) {
-      if (!browserVerificationSuccessNotified) {
-        sendBrowserActivitySuccessNotification(profileVerification);
-        browserVerificationSuccessNotified = true;
-        justNotifiedBrowserCheck = true;
-      }
-    } else {
-      browserVerificationSuccessNotified = false;
+    if (!profileVerification.passed) {
       await triggerProlificScreenOut("chrome_activity_failed", profileVerification, null);
       return;
     }
@@ -284,21 +232,6 @@ async function checkUberLogin(forceNotify = false) {
     const sid = await chrome.cookies.get({ url: "https://m.uber.com", name: "sid" });
     const hasSession = sid !== null;
     console.log(`🔐 Login check: sid cookie ${hasSession ? "FOUND" : "NOT FOUND"}`);
-
-    if (hasSession) {
-      if (forceNotify || !uberLoginSuccessNotified) {
-        if (justNotifiedBrowserCheck) {
-          await new Promise((resolve) => setTimeout(resolve, 1200));
-          sendUberLoginSuccessNotification();
-        } else {
-          sendUberLoginSuccessNotification();
-        }
-        justNotifiedUberLogin = true;
-        uberLoginSuccessNotified = true;
-      }
-    } else {
-      uberLoginSuccessNotified = false;
-    }
 
     let tripHistoryVerification = {
       passed: false,
@@ -322,24 +255,7 @@ async function checkUberLogin(forceNotify = false) {
         };
       }
 
-      if (tripHistoryVerification.passed) {
-        if (forceNotify || !tripHistorySuccessNotified) {
-          if (justNotifiedUberLogin) {
-            await new Promise((resolve) => setTimeout(resolve, 1200));
-          }
-          sendTripHistorySuccessNotification(tripHistoryVerification);
-          tripHistorySuccessNotified = true;
-        }
-        tripHistoryFailureNotified = false;
-      } else {
-        tripHistorySuccessNotified = false;
-        if (forceNotify || !tripHistoryFailureNotified) {
-          if (justNotifiedUberLogin) {
-            await new Promise((resolve) => setTimeout(resolve, 1200));
-          }
-          sendTripHistoryFailureNotification(tripHistoryVerification);
-          tripHistoryFailureNotified = true;
-        }
+      if (!tripHistoryVerification.passed) {
         await triggerProlificScreenOut("uber_history_failed", profileVerification, tripHistoryVerification);
         return;
       }
@@ -353,11 +269,6 @@ async function checkUberLogin(forceNotify = false) {
             totalTripsSinceCutoff: 5,
             profileSummaries: [],
           };
-      tripHistorySuccessNotified = true;
-      tripHistoryFailureNotified = false;
-    } else {
-      tripHistorySuccessNotified = false;
-      tripHistoryFailureNotified = false;
     }
 
     const nextEligibilityVerified =
@@ -365,10 +276,6 @@ async function checkUberLogin(forceNotify = false) {
 
     await chrome.storage.local.set({
       tripState: state,
-      browserVerificationSuccessNotified,
-      uberLoginSuccessNotified,
-      tripHistorySuccessNotified,
-      tripHistoryFailureNotified,
       activityVerificationCompleted,
       activityVerificationResult,
       eligibilityVerified: nextEligibilityVerified,
