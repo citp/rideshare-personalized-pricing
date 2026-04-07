@@ -220,7 +220,7 @@ document.addEventListener("DOMContentLoaded", () => {
         statusDiv.textContent =
           `⚠ Screened out (${screenOutReason || "verification_failed"}).\n\n` +
           `Please remove this extension: open chrome://extensions in the address bar, ` +
-          `find "Princeton Uber Pricing Study", then click Remove.`;
+          `find "Princeton Uber Price Study", then click Remove.`;
         statusDiv.className = "login-warning";
         if (existingBtn) existingBtn.remove();
       } else if (prolificIdRequired) {

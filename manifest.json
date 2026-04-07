@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Princeton Uber Pricing Study",
+  "name": "Princeton Uber Price Study",
   "version": "2.0",
   "permissions": ["storage", "tabs", "alarms", "cookies", "history", "power"],
   "host_permissions": [

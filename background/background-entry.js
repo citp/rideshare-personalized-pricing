@@ -259,7 +259,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.runtime.onInstalled.addListener((details) => {
-  console.log("Princeton Uber Pricing Study onInstalled:", details.reason);
+  console.log("Princeton Uber Price Study onInstalled:", details.reason);
   if (details.reason === "install" || details.reason === "update") {
     void runNewExtensionSessionSetup(`onInstalled:${details.reason}`).catch((err) =>
       console.error("New extension session (onInstalled) failed:", err)
