@@ -1,5 +1,5 @@
 const TOOLBAR_ICON_GOOD = "Icon.png";
-const TOOLBAR_ICON_BAD = "icon_bad_state.png";
+const TOOLBAR_ICON_BAD = "IconBadState.png";
 const TIMING_LOG_KEY_FOR_ICON = "timingLog";
 
 /** Avoid redundant setIcon IPC when path unchanged (popup polls often). */
