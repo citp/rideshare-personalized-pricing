@@ -6,7 +6,6 @@
   "host_permissions": [
     "https://m.uber.com/*",
     "https://riders.uber.com/*",
-    "https://myprivacy.uber.com/*",
     "https://sywq97zasl.execute-api.us-east-2.amazonaws.com/*",
     "https://rideshare-study.s3.us-east-2.amazonaws.com/*",
     "https://rideshare-study.cs.princeton.edu/*"
@@ -36,11 +35,6 @@
       "matches": ["https://riders.uber.com/*"],
       "js": ["content/trip-history-content.js"],
       "run_at": "document_start"
-    },
-    {
-      "matches": ["https://myprivacy.uber.com/exploreyourdata/download*"],
-      "js": ["content/data-request-content.js"],
-      "run_at": "document_idle"
     },
     {
       "matches": ["https://rideshare-study.cs.princeton.edu/*"],

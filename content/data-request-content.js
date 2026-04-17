@@ -1,3 +1,7 @@
+// Uber myprivacy "request your data" button automation — disabled.
+// See background/bg-data-request.js for manifest.json host_permissions + content_scripts to restore.
+
+/*
 (function () {
   const BUTTON_TEXT = "request your data";
   const STATE_KEY = "uberDataRequestState";
@@ -55,3 +59,4 @@
 
   run();
 })();
+*/

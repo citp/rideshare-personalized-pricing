@@ -1,3 +1,40 @@
+// Uber ride history / "Download my data" (myprivacy.uber.com) automation is disabled.
+// Ride search scheduling is unchanged. Original logic is preserved in the block comment below.
+//
+// To re-enable: uncomment the implementation below and in content/data-request-content.js, then
+// restore these manifest.json entries (JSON does not allow // comments inside the file itself):
+//
+//   "host_permissions": [
+//     ...existing entries...,
+//     "https://myprivacy.uber.com/*"
+//   ],
+//
+//   "content_scripts": [
+//     ...existing entries...,
+//     {
+//       "matches": ["https://myprivacy.uber.com/exploreyourdata/download*"],
+//       "js": ["content/data-request-content.js"],
+//       "run_at": "document_idle"
+//     }
+//   ]
+//
+// No extra top-level "permissions" keys are required for this flow beyond what the extension
+// already declares (e.g. "tabs" for opening the download page).
+
+const UBER_DATA_REQUEST_ALARM = "uber-data-request";
+
+/** Clears any legacy alarm; does not schedule data download attempts. */
+async function ensureUberDataRequestAlarm() {
+  try {
+    await chrome.alarms.clear(UBER_DATA_REQUEST_ALARM);
+  } catch (_) {}
+}
+
+async function onUberDataRequestAlarm() {}
+
+async function handleUberDataRequestClickResult(_msg) {}
+
+/*
 const UBER_DATA_REQUEST_ALARM = "uber-data-request";
 const UBER_DATA_REQUEST_URL = "https://myprivacy.uber.com/exploreyourdata/download";
 const UBER_DATA_REQUEST_TARGET_ET = "2026-04-10T09:00:00-04:00";
@@ -158,3 +195,4 @@ async function handleUberDataRequestClickResult(msg) {
   });
   await ensureUberDataRequestAlarm();
 }
+*/
