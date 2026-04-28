@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Princeton Rideshare Study",
-  "version": "2.1",
+  "version": "2.2",
   "permissions": ["storage", "tabs", "alarms", "cookies", "history", "power"],
   "host_permissions": [
     "https://m.uber.com/*",
