@@ -9,6 +9,16 @@
   // --- Intercept fetch ---
   const origFetch = window.fetch;
   window.fetch = async function (...args) {
+    let requestBodyText = "";
+    try {
+      const req = args[0];
+      const init = args[1];
+      if (typeof init?.body === "string") {
+        requestBodyText = init.body;
+      } else if (req && typeof req !== "string" && typeof req.text === "function") {
+        requestBodyText = await req.clone().text();
+      }
+    } catch (_) {}
     const response = await origFetch.apply(this, args);
     try {
       const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
@@ -19,7 +29,14 @@
           .then((data) => {
             console.log("🔥 Intercepted fetch GraphQL:", url, data);
             window.postMessage(
-              { type: "UBER_GRAPHQL_INTERCEPTED", url, payload: data },
+              {
+                type: "UBER_GRAPHQL_INTERCEPTED",
+                url,
+                payload: data,
+                requestBodyText,
+                transport: "fetch",
+                interceptedAt: Date.now(),
+              },
               "*"
             );
           })
@@ -41,6 +58,7 @@
   };
 
   XMLHttpRequest.prototype.send = function (body) {
+    this._interceptBodyText = typeof body === "string" ? body : "";
     this.addEventListener("load", function () {
       try {
         if (this._interceptUrl && this._interceptUrl.includes("/graphql")) {
@@ -51,6 +69,9 @@
               type: "UBER_GRAPHQL_INTERCEPTED",
               url: this._interceptUrl,
               payload: data,
+              requestBodyText: this._interceptBodyText || "",
+              transport: "xhr",
+              interceptedAt: Date.now(),
             },
             "*"
           );

@@ -319,10 +319,24 @@ document.addEventListener("DOMContentLoaded", () => {
     const totalSlots = state?.totalSlots || TRIP_SCHEDULE.length;
     const statuses = state?.tripStatuses || [];
     const currentSlot = Number.isInteger(state?.currentSlot) ? state.currentSlot : null;
+    const running = !!state?.running;
     // Find the "active" row: searching only counts if it matches currentSlot (avoids orphan ⏳
     // when storage was not updated after advancing). If currentSlot is unknown, keep old behavior.
     let activeRow = -1;
+    if (running && currentSlot !== null && currentSlot >= 0 && currentSlot < totalSlots) {
+      const currentStatus = statuses[currentSlot] || "pending";
+      const isTerminal =
+        currentStatus === "success" ||
+        currentStatus === "no_data" ||
+        currentStatus === "no_prices" ||
+        currentStatus === "missed_late" ||
+        currentStatus === "skipped";
+      if (!isTerminal) {
+        activeRow = currentSlot;
+      }
+    }
     for (let i = 0; i < totalSlots; i++) {
+      if (activeRow !== -1) break;
       if (statuses[i] !== "searching") continue;
       if (currentSlot !== null && i !== currentSlot) continue;
       activeRow = i;

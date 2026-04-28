@@ -38,6 +38,7 @@ const AWS_UPLOAD_STUDY_TYPE = "pricing";
 const AWS_UPLOAD_MAX_ROWS_PER_FILE = 100;
 const APPROX_COORD_DECIMALS = 2;
 const SCHEDULER_ALARM_PREFIX = `${ALARM_NAME}:slot:`;
+const CAPTURE_TIMEOUT_ALARM_PREFIX = `${ALARM_NAME}:capture-timeout:slot:`;
 const PREWARM_OFFSETS_MS = [5 * 60 * 1000, 3 * 60 * 1000, 90 * 1000, 30 * 1000];
 const STUDY_UBER_TAB_ID_KEY = "studyUberTabId";
 const DETAIL_CAPTURE_TIMEOUT_MS = 30000;
@@ -124,6 +125,20 @@ function parseSchedulerAlarmName(name) {
     phase: match[2],
     offsetMs: Number(match[3]),
   };
+}
+
+function buildCaptureTimeoutAlarmName(slot) {
+  return `${CAPTURE_TIMEOUT_ALARM_PREFIX}${slot}`;
+}
+
+function parseCaptureTimeoutAlarmName(name) {
+  const match = /^uber-trip-scheduler:capture-timeout:slot:(\d+)$/.exec(name || "");
+  if (!match) return null;
+  return Number(match[1]);
+}
+
+async function clearCaptureTimeoutAlarm(slot) {
+  await chrome.alarms.clear(buildCaptureTimeoutAlarmName(slot));
 }
 
 async function ensureUberTabWarmup(nextSlot) {
@@ -432,6 +447,7 @@ async function tryPromoteSearchingSlotToSuccessFromDom({ state, slot, trip, prol
   state.results.push(...slotRowsForUpload);
   state.capturedForCurrent = true;
   state.tripStatuses[slot] = "success";
+  await clearCaptureTimeoutAlarm(slot);
   const awsResult = await uploadSearchRowsToAws({
     slot,
     trip,
@@ -693,6 +709,55 @@ const _captureSlotsInProgress = new Set();
 
 async function onSlotAlarm(alarmName = ALARM_NAME) {
   try {
+    const timeoutSlot = parseCaptureTimeoutAlarmName(alarmName);
+    if (Number.isInteger(timeoutSlot)) {
+      const stored = await chrome.storage.local.get(["tripState"]);
+      const s = stored.tripState;
+      if (!s || !s.running) return;
+      if (s.currentSlot !== timeoutSlot) return;
+      if (s.capturedForCurrent || s.tripStatuses[timeoutSlot] !== "searching") return;
+      const trip = TRIPS[timeoutSlot];
+      const prolificId = await getStoredProlificId();
+      const domRescue = await tryPromoteSearchingSlotToSuccessFromDom({
+        state: s,
+        slot: timeoutSlot,
+        trip,
+        prolificId,
+      });
+      if (domRescue.ok) return;
+
+      console.warn(`⏰ Capture timeout for trip #${timeoutSlot} (${trip.scheduledISO}) — marking no_data`);
+      s.tripStatuses[timeoutSlot] = "no_data";
+      await clearCaptureTimeoutAlarm(timeoutSlot);
+      const awsResult = await uploadSearchRowsToAws({
+        slot: timeoutSlot,
+        trip,
+        outcome: "no_data",
+        rows: [],
+        searchContext: getSlotSearchContext(s, timeoutSlot, trip),
+      });
+      if (!awsResult.ok) {
+        console.warn(`⚠ AWS upload failed for slot ${timeoutSlot}: ${awsResult.reason || "unknown_error"}`);
+      } else {
+        console.log(`☁️ AWS upload complete for slot ${timeoutSlot}: ${awsResult.uploadedFiles} file(s)`);
+      }
+      const metric = upsertSlotMetric(s, timeoutSlot, {
+        captureEndedAt: Date.now(),
+        outcome: "no_data",
+      });
+      await appendTimingLog({
+        ...metric,
+        timestamp: new Date().toISOString(),
+        tripLabel: trip.label,
+        scheduledISO: trip.scheduledISO,
+        prolificId,
+      });
+      await updateSearchHealthAndMaybeNotify(s);
+      await chrome.storage.local.set({ tripState: s });
+      await updateBadge(s);
+      return;
+    }
+
     const alarmInfo = parseSchedulerAlarmName(alarmName);
     const phase = alarmInfo?.phase || "exact";
     const alarmSlot = Number.isInteger(alarmInfo?.slot) ? alarmInfo.slot : null;
@@ -904,6 +969,9 @@ async function markDayComplete(state) {
     }
   }
   await chrome.storage.local.set({ tripState: state });
+  if (Number.isInteger(state.currentSlot)) {
+    await clearCaptureTimeoutAlarm(state.currentSlot);
+  }
   await updateBadge(state);
   chrome.alarms.clear(ALARM_NAME);
   releaseSearchKeepAwake();
@@ -962,59 +1030,10 @@ async function runTrip(state) {
     };
     await chrome.storage.local.set({ tripState: state });
     await chrome.tabs.update(tabId, { url });
+    chrome.alarms.create(buildCaptureTimeoutAlarmName(slot), { when: Date.now() + CAPTURE_TIMEOUT_MS });
   } catch (err) {
     console.error("runTrip error:", err);
   }
-
-  setTimeout(async () => {
-    try {
-      const stored = await chrome.storage.local.get(["tripState"]);
-      const s = stored.tripState;
-      if (!s) return;
-      if (s.currentSlot === slot && !s.capturedForCurrent && s.tripStatuses[slot] === "searching") {
-        const prolificId = await getStoredProlificId();
-        const domRescue = await tryPromoteSearchingSlotToSuccessFromDom({
-          state: s,
-          slot,
-          trip,
-          prolificId,
-        });
-        if (domRescue.ok) {
-          return;
-        }
-
-        console.warn(`⏰ Capture timeout for trip #${slot} (${trip.scheduledISO}) — marking no_data`);
-        s.tripStatuses[slot] = "no_data";
-        const awsResult = await uploadSearchRowsToAws({
-          slot,
-          trip,
-          outcome: "no_data",
-          rows: [],
-          searchContext: getSlotSearchContext(s, slot, trip),
-        });
-        if (!awsResult.ok) {
-          console.warn(`⚠ AWS upload failed for slot ${slot}: ${awsResult.reason || "unknown_error"}`);
-        } else {
-          console.log(`☁️ AWS upload complete for slot ${slot}: ${awsResult.uploadedFiles} file(s)`);
-        }
-        const metric = upsertSlotMetric(s, slot, {
-          captureEndedAt: Date.now(),
-          outcome: "no_data",
-        });
-        await appendTimingLog({
-          ...metric,
-          timestamp: new Date().toISOString(),
-          tripLabel: trip.label,
-          scheduledISO: trip.scheduledISO,
-          prolificId,
-        });
-        await updateSearchHealthAndMaybeNotify(s);
-        await updateBadge(s);
-      }
-    } catch (e) {
-      console.error("Capture timeout error:", e);
-    }
-  }, CAPTURE_TIMEOUT_MS);
 }
 
 function applyDetailBreakdownToRow(row, detail) {
@@ -1028,6 +1047,11 @@ function applyDetailBreakdownToRow(row, detail) {
   row.waitTimeDetail = detail.waitTimeDetail ?? row.waitTimeDetail ?? "";
   row.breakdownCaptureStatus = detail.breakdownCaptureStatus ?? row.breakdownCaptureStatus ?? "";
   row.breakdownCaptureError = detail.breakdownCaptureError ?? row.breakdownCaptureError ?? "";
+  row.detailClickAttempted = detail.detailClickAttempted ?? row.detailClickAttempted ?? "";
+  row.detailClickMatchedNode = detail.detailClickMatchedNode ?? row.detailClickMatchedNode ?? "";
+  row.detailGraphqlEventsSeenAfterClick =
+    detail.detailGraphqlEventsSeenAfterClick ?? row.detailGraphqlEventsSeenAfterClick ?? "";
+  row.detailProductWasPreselected = detail.detailProductWasPreselected ?? row.detailProductWasPreselected ?? "";
 }
 
 async function tryCaptureDetailedBreakdowns(slotRowsForUpload) {
@@ -1090,6 +1114,7 @@ async function handleProductsCapture(productsData) {
 
   try {
     state.capturedForCurrent = true;
+    await clearCaptureTimeoutAlarm(slot);
     // Persist capture lock immediately to avoid race with another products payload.
     await chrome.storage.local.set({ tripState: state });
 
@@ -1158,6 +1183,10 @@ async function handleProductsCapture(productsData) {
             waitTimeDetail: "",
             breakdownCaptureStatus: "not_attempted",
             breakdownCaptureError: "",
+            detailClickAttempted: "",
+            detailClickMatchedNode: "",
+            detailGraphqlEventsSeenAfterClick: "",
+            detailProductWasPreselected: "",
           };
           state.results.push(capturedRow);
           slotRowsForUpload.push(capturedRow);
@@ -1204,6 +1233,7 @@ async function handleProductsCapture(productsData) {
       }
     } else {
       state.tripStatuses[slot] = "no_prices";
+      await clearCaptureTimeoutAlarm(slot);
       state.loginRequired = true;
       state.running = false;
       state.results.splice(state.results.length - count, count);

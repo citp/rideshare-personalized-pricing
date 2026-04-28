@@ -255,7 +255,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM_NAME || alarm.name.startsWith(`${ALARM_NAME}:slot:`)) {
+  if (
+    alarm.name === ALARM_NAME ||
+    alarm.name.startsWith(`${ALARM_NAME}:slot:`) ||
+    alarm.name.startsWith(`${ALARM_NAME}:capture-timeout:slot:`)
+  ) {
     onSlotAlarm(alarm.name);
   }
   if (alarm.name === LOGIN_CHECK_ALARM) {
