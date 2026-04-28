@@ -40,6 +40,7 @@ const APPROX_COORD_DECIMALS = 2;
 const SCHEDULER_ALARM_PREFIX = `${ALARM_NAME}:slot:`;
 const PREWARM_OFFSETS_MS = [5 * 60 * 1000, 3 * 60 * 1000, 90 * 1000, 30 * 1000];
 const STUDY_UBER_TAB_ID_KEY = "studyUberTabId";
+const DETAIL_CAPTURE_TIMEOUT_MS = 30000;
 /** Install-time snapshot on study site; used only when trip-time Uber geolocation is unavailable. */
 const STUDY_GEO_SNAPSHOT_KEY = "studyGeoSnapshot";
 
@@ -352,7 +353,134 @@ async function getApproxBrowserLocationForCapture() {
   }
 }
 
-async function uploadSearchRowsToAws({ slot, trip, outcome, rows }) {
+async function tryCaptureVisibleProductsFromDom() {
+  try {
+    const storage = await chrome.storage.local.get([STUDY_UBER_TAB_ID_KEY]);
+    const tabId = storage[STUDY_UBER_TAB_ID_KEY];
+    if (typeof tabId !== "number") return { ok: false, rows: [], reason: "missing_tab_id" };
+    const response = await chrome.tabs.sendMessage(tabId, { type: "CAPTURE_VISIBLE_PRODUCTS" });
+    if (!response?.ok || !Array.isArray(response.rows)) {
+      return { ok: false, rows: [], reason: response?.reason || "capture_failed" };
+    }
+    return { ok: true, rows: response.rows };
+  } catch (err) {
+    return { ok: false, rows: [], reason: String(err) };
+  }
+}
+
+function buildDomFallbackCapturedRow({ prolificId, slot, trip, locationSnapshot, domRow }) {
+  return {
+    prolificId,
+    slot,
+    scheduledISO: trip.scheduledISO,
+    scheduledET: trip.etTime,
+    tripLabel: trip.label,
+    searchTime: new Date().toISOString(),
+    tier: "",
+    productName: domRow.productName ?? "",
+    productType: "",
+    estimatedTripTime: "",
+    etaStringShort: domRow.etaStringShort ?? "",
+    fare: domRow.fare ?? "",
+    preAdjustmentValue: "",
+    discountPrimary: "",
+    discountedFare: "",
+    hasBenefitsOnFare: "",
+    hasPromo: "",
+    hasRidePass: "",
+    fareEstimateInfo: "",
+    ezpzFareBreakdown: "",
+    multiplier: "",
+    surgeSuppressionThreshold: "",
+    approxUserLat: locationSnapshot.approxUserLat,
+    approxUserLng: locationSnapshot.approxUserLng,
+    approxUserLocationSource: `${locationSnapshot.locationSource || "unavailable"}_dom_fallback`,
+    originLat: "",
+    originLng: "",
+    destinationLat: "",
+    destinationLng: "",
+    capacity: "",
+    issuedAt: "",
+    isSobriety: "",
+    baseFare: "",
+    minimumFare: "",
+    perMinute: "",
+    perMile: "",
+    estimatedSurcharges: "",
+    bookingFee: "",
+    waitTimeDetail: "",
+    breakdownCaptureStatus: "not_attempted",
+    breakdownCaptureError: "graphQL_products_payload_missing",
+  };
+}
+
+async function tryPromoteSearchingSlotToSuccessFromDom({ state, slot, trip, prolificId }) {
+  const domFallback = await tryCaptureVisibleProductsFromDom();
+  if (!domFallback.ok || domFallback.rows.length === 0) {
+    return { ok: false, reason: domFallback.reason || "no_dom_rows" };
+  }
+  const locationSnapshot = await getApproxBrowserLocationForCapture();
+  const slotRowsForUpload = domFallback.rows.map((r) =>
+    buildDomFallbackCapturedRow({
+      prolificId,
+      slot,
+      trip,
+      locationSnapshot,
+      domRow: r,
+    })
+  );
+  state.results.push(...slotRowsForUpload);
+  state.capturedForCurrent = true;
+  state.tripStatuses[slot] = "success";
+  const awsResult = await uploadSearchRowsToAws({
+    slot,
+    trip,
+    outcome: "success",
+    rows: slotRowsForUpload,
+    searchContext: getSlotSearchContext(state, slot, trip),
+  });
+  if (!awsResult.ok) {
+    console.warn(`⚠ AWS upload failed for slot ${slot}: ${awsResult.reason || "unknown_error"}`);
+  } else {
+    console.log(`☁️ AWS upload complete for slot ${slot}: ${awsResult.uploadedFiles} file(s)`);
+  }
+  const metric = upsertSlotMetric(state, slot, {
+    captureEndedAt: Date.now(),
+    outcome: "success",
+    capturedRows: slotRowsForUpload.length,
+  });
+  await appendTimingLog({
+    ...metric,
+    timestamp: new Date().toISOString(),
+    tripLabel: trip.label,
+    scheduledISO: trip.scheduledISO,
+    prolificId,
+  });
+  await updateSearchHealthAndMaybeNotify(state);
+  await chrome.storage.local.set({ tripState: state });
+  await updateBadge(state);
+  return { ok: true, rows: slotRowsForUpload.length };
+}
+
+function getSlotSearchContext(state, slot, trip) {
+  const slotKey = String(slot);
+  const slotContext = state?.searchContextBySlot?.[slotKey] || {};
+  const defaultRideParams = {
+    pickupLat: trip?.pickupLat ?? "",
+    pickupLng: trip?.pickupLng ?? "",
+    dropoffLat: trip?.dropoffLat ?? "",
+    dropoffLng: trip?.dropoffLng ?? "",
+    tripLabel: trip?.label ?? "",
+    scheduledISO: trip?.scheduledISO ?? "",
+    scheduledET: trip?.etTime ?? "",
+  };
+  return {
+    ...slotContext,
+    rideSearchParameters: slotContext.rideSearchParameters || defaultRideParams,
+  };
+}
+
+async function uploadSearchRowsToAws({ slot, trip, outcome, rows, searchContext = null }) {
   try {
     const pid = await getStoredProlificId();
     if (!pid) {
@@ -397,6 +525,7 @@ async function uploadSearchRowsToAws({ slot, trip, outcome, rows }) {
         scheduledISO: trip?.scheduledISO || "",
         scheduledET: trip?.etTime || "",
         tripLabel: trip?.label || "",
+        searchContext: searchContext || null,
         outcome,
         batchIndex: index + 1,
         batchCount: batches.length,
@@ -574,18 +703,37 @@ async function onSlotAlarm(alarmName = ALARM_NAME) {
     if (!state || !state.running) return;
 
     if (!state.capturedForCurrent && state.tripStatuses[state.currentSlot] === "searching") {
-      state.tripStatuses[state.currentSlot] = "no_data";
+      const activeMetric = Array.isArray(state.timingMetrics)
+        ? state.timingMetrics.find((m) => m?.slot === state.currentSlot)
+        : null;
+      const captureStartedAt = Number(activeMetric?.captureStartedAt);
+      const searchAgeMs = Number.isFinite(captureStartedAt) ? Date.now() - captureStartedAt : Infinity;
+      if (searchAgeMs < CAPTURE_TIMEOUT_MS) {
+        // The active slot is still within capture window; do not prematurely mark no_data.
+        return;
+      }
+      const prolificId = await getStoredProlificId();
       const currentTrip = TRIPS[state.currentSlot];
-      const awsResult = await uploadSearchRowsToAws({
+      const domRescue = await tryPromoteSearchingSlotToSuccessFromDom({
+        state,
         slot: state.currentSlot,
         trip: currentTrip,
-        outcome: "no_data",
-        rows: [],
+        prolificId,
       });
-      if (!awsResult.ok) {
-        console.warn(`⚠ AWS upload failed for slot ${state.currentSlot}: ${awsResult.reason || "unknown_error"}`);
-      } else {
-        console.log(`☁️ AWS upload complete for slot ${state.currentSlot}: ${awsResult.uploadedFiles} file(s)`);
+      if (!domRescue.ok) {
+        state.tripStatuses[state.currentSlot] = "no_data";
+        const awsResult = await uploadSearchRowsToAws({
+          slot: state.currentSlot,
+          trip: currentTrip,
+          outcome: "no_data",
+          rows: [],
+          searchContext: getSlotSearchContext(state, state.currentSlot, currentTrip),
+        });
+        if (!awsResult.ok) {
+          console.warn(`⚠ AWS upload failed for slot ${state.currentSlot}: ${awsResult.reason || "unknown_error"}`);
+        } else {
+          console.log(`☁️ AWS upload complete for slot ${state.currentSlot}: ${awsResult.uploadedFiles} file(s)`);
+        }
       }
       try {
         const storage = await chrome.storage.local.get([STUDY_UBER_TAB_ID_KEY]);
@@ -606,9 +754,11 @@ async function onSlotAlarm(alarmName = ALARM_NAME) {
           return;
         }
       } catch (_) {}
-      // Must persist before the fresh read below; otherwise storage still has "searching"
-      // and the next block overwrites this fix (orphan ⏳ row + wrong popup highlight).
-      await chrome.storage.local.set({ tripState: state });
+      if (!domRescue.ok) {
+        // Must persist before the fresh read below; otherwise storage still has "searching"
+        // and the next block overwrites this fix (orphan ⏳ row + wrong popup highlight).
+        await chrome.storage.local.set({ tripState: state });
+      }
     }
 
     if (Date.now() >= state.endTime) {
@@ -786,6 +936,31 @@ async function runTrip(state) {
 
   try {
     const { tabId } = await getOrCreateStudyUberTab();
+    let preSearchPromo = null;
+    try {
+      const promoResp = await chrome.tabs.sendMessage(tabId, { type: "CAPTURE_PRESEARCH_PROMO" });
+      if (promoResp?.ok && promoResp.promo) {
+        preSearchPromo = promoResp.promo;
+      }
+    } catch (_) {}
+    const slotKey = String(slot);
+    if (!state.searchContextBySlot || typeof state.searchContextBySlot !== "object") {
+      state.searchContextBySlot = {};
+    }
+    state.searchContextBySlot[slotKey] = {
+      capturedAt: new Date().toISOString(),
+      rideSearchParameters: {
+        pickupLat: trip.pickupLat,
+        pickupLng: trip.pickupLng,
+        dropoffLat: trip.dropoffLat,
+        dropoffLng: trip.dropoffLng,
+        tripLabel: trip.label,
+        scheduledISO: trip.scheduledISO,
+        scheduledET: trip.etTime,
+      },
+      preSearchPromo,
+    };
+    await chrome.storage.local.set({ tripState: state });
     await chrome.tabs.update(tabId, { url });
   } catch (err) {
     console.error("runTrip error:", err);
@@ -798,6 +973,16 @@ async function runTrip(state) {
       if (!s) return;
       if (s.currentSlot === slot && !s.capturedForCurrent && s.tripStatuses[slot] === "searching") {
         const prolificId = await getStoredProlificId();
+        const domRescue = await tryPromoteSearchingSlotToSuccessFromDom({
+          state: s,
+          slot,
+          trip,
+          prolificId,
+        });
+        if (domRescue.ok) {
+          return;
+        }
+
         console.warn(`⏰ Capture timeout for trip #${slot} (${trip.scheduledISO}) — marking no_data`);
         s.tripStatuses[slot] = "no_data";
         const awsResult = await uploadSearchRowsToAws({
@@ -805,6 +990,7 @@ async function runTrip(state) {
           trip,
           outcome: "no_data",
           rows: [],
+          searchContext: getSlotSearchContext(s, slot, trip),
         });
         if (!awsResult.ok) {
           console.warn(`⚠ AWS upload failed for slot ${slot}: ${awsResult.reason || "unknown_error"}`);
@@ -829,6 +1015,65 @@ async function runTrip(state) {
       console.error("Capture timeout error:", e);
     }
   }, CAPTURE_TIMEOUT_MS);
+}
+
+function applyDetailBreakdownToRow(row, detail) {
+  if (!row || !detail) return;
+  row.baseFare = detail.baseFare ?? row.baseFare ?? "";
+  row.minimumFare = detail.minimumFare ?? row.minimumFare ?? "";
+  row.perMinute = detail.perMinute ?? row.perMinute ?? "";
+  row.perMile = detail.perMile ?? row.perMile ?? "";
+  row.estimatedSurcharges = detail.estimatedSurcharges ?? row.estimatedSurcharges ?? "";
+  row.bookingFee = detail.bookingFee ?? row.bookingFee ?? "";
+  row.waitTimeDetail = detail.waitTimeDetail ?? row.waitTimeDetail ?? "";
+  row.breakdownCaptureStatus = detail.breakdownCaptureStatus ?? row.breakdownCaptureStatus ?? "";
+  row.breakdownCaptureError = detail.breakdownCaptureError ?? row.breakdownCaptureError ?? "";
+}
+
+async function tryCaptureDetailedBreakdowns(slotRowsForUpload) {
+  if (!Array.isArray(slotRowsForUpload) || slotRowsForUpload.length === 0) {
+    return { ok: false, reason: "no_rows" };
+  }
+
+  const productNames = Array.from(
+    new Set(
+      slotRowsForUpload
+        .map((r) => (typeof r?.productName === "string" ? r.productName.trim() : ""))
+        .filter(Boolean)
+    )
+  );
+  if (productNames.length === 0) {
+    return { ok: false, reason: "no_product_names" };
+  }
+
+  try {
+    const storage = await chrome.storage.local.get([STUDY_UBER_TAB_ID_KEY]);
+    const tabId = storage[STUDY_UBER_TAB_ID_KEY];
+    if (typeof tabId !== "number") {
+      return { ok: false, reason: "missing_tab_id" };
+    }
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: "CAPTURE_PRODUCT_BREAKDOWNS",
+      productNames,
+      timeoutMs: DETAIL_CAPTURE_TIMEOUT_MS,
+    });
+    if (!response?.ok || !response?.breakdowns) {
+      return { ok: false, reason: response?.reason || "capture_failed" };
+    }
+
+    for (const row of slotRowsForUpload) {
+      const key = typeof row.productName === "string" ? row.productName.trim() : "";
+      const detail = key ? response.breakdowns[key] : null;
+      if (detail) {
+        applyDetailBreakdownToRow(row, detail);
+      } else if (!row.breakdownCaptureStatus) {
+        row.breakdownCaptureStatus = "not_attempted";
+      }
+    }
+    return { ok: true, failedProducts: response.failedProducts || [] };
+  } catch (err) {
+    return { ok: false, reason: String(err) };
+  }
 }
 
 async function handleProductsCapture(productsData) {
@@ -904,6 +1149,15 @@ async function handleProductsCapture(productsData) {
             capacity: uf.capacity ?? "",
             issuedAt: sig.issuedAt ?? "",
             isSobriety: dynFare.isSobriety ?? "",
+            baseFare: "",
+            minimumFare: "",
+            perMinute: "",
+            perMile: "",
+            estimatedSurcharges: "",
+            bookingFee: "",
+            waitTimeDetail: "",
+            breakdownCaptureStatus: "not_attempted",
+            breakdownCaptureError: "",
           };
           state.results.push(capturedRow);
           slotRowsForUpload.push(capturedRow);
@@ -913,6 +1167,14 @@ async function handleProductsCapture(productsData) {
     }
 
     if (hasValidFare) {
+      const detailCapture = await tryCaptureDetailedBreakdowns(slotRowsForUpload);
+      if (!detailCapture.ok) {
+        console.warn(`⚠ Detailed breakdown capture skipped/failed for slot ${slot}: ${detailCapture.reason}`);
+      } else if (detailCapture.failedProducts?.length) {
+        console.warn(
+          `⚠ Detailed breakdown capture partial for slot ${slot}; failed products: ${detailCapture.failedProducts.join(", ")}`
+        );
+      }
       state.tripStatuses[slot] = "success";
       const metric = upsertSlotMetric(state, slot, {
         captureEndedAt: Date.now(),
@@ -933,6 +1195,7 @@ async function handleProductsCapture(productsData) {
         trip,
         outcome: "success",
         rows: slotRowsForUpload,
+        searchContext: getSlotSearchContext(state, slot, trip),
       });
       if (!awsResult.ok) {
         console.warn(`⚠ AWS upload failed for slot ${slot}: ${awsResult.reason || "unknown_error"}`);
@@ -966,6 +1229,7 @@ async function handleProductsCapture(productsData) {
         trip,
         outcome: "no_prices",
         rows: [],
+        searchContext: getSlotSearchContext(state, slot, trip),
       });
       if (!awsResult.ok) {
         console.warn(`⚠ AWS upload failed for slot ${slot}: ${awsResult.reason || "unknown_error"}`);

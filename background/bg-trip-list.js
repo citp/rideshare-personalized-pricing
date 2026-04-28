@@ -1,5 +1,8 @@
 /** Canonical schedule: https://rideshare-study.cs.princeton.edu/pricing/extension/ride-searches.html */
 const RIDE_SCHEDULE_STORAGE_KEY = "rideScheduleBaseTrips";
+const RIDE_SCHEDULE_LAST_FETCHED_AT_KEY = "rideScheduleLastFetchedAt";
+const RIDE_SCHEDULE_REFRESH_ALARM = "ride-schedule-refresh";
+const RIDE_SCHEDULE_REFRESH_INTERVAL_MINUTES = 24 * 60;
 
 var TRIPS = [];
 var TOTAL_SLOTS = 0;
@@ -7,14 +10,16 @@ var SCHEDULE_START_MS = Date.now();
 var SCHEDULE_END_MS = Date.now();
 
 function applyTripScheduleBase(baseTrips) {
-  TRIPS = baseTrips.map((trip) => {
-    const runAtMs = Date.parse(trip.etTime);
-    return {
-      ...trip,
-      runAtMs,
-      scheduledISO: new Date(runAtMs).toISOString(),
-    };
-  });
+  TRIPS = baseTrips
+    .map((trip) => {
+      const runAtMs = Date.parse(trip.etTime);
+      return {
+        ...trip,
+        runAtMs,
+        scheduledISO: new Date(runAtMs).toISOString(),
+      };
+    })
+    .sort((a, b) => a.runAtMs - b.runAtMs);
   TOTAL_SLOTS = TRIPS.length;
   SCHEDULE_START_MS = TRIPS[0]?.runAtMs ?? Date.now();
   SCHEDULE_END_MS = TOTAL_SLOTS > 0 ? TRIPS[TOTAL_SLOTS - 1].runAtMs : SCHEDULE_START_MS;
@@ -55,7 +60,10 @@ async function fetchRideSearchesFromStudySite() {
 
 async function fetchPersistAndApplyRideSchedule() {
   const base = await fetchRideSearchesFromStudySite();
-  await chrome.storage.local.set({ [RIDE_SCHEDULE_STORAGE_KEY]: base });
+  await chrome.storage.local.set({
+    [RIDE_SCHEDULE_STORAGE_KEY]: base,
+    [RIDE_SCHEDULE_LAST_FETCHED_AT_KEY]: Date.now(),
+  });
   applyTripScheduleBase(base);
 }
 
@@ -79,4 +87,27 @@ function ensureTripScheduleHydratedFromStorage() {
     _ensureTripScheduleHydratedPromise = hydrateTripScheduleIfStored();
   }
   return _ensureTripScheduleHydratedPromise;
+}
+
+async function ensureRideScheduleRefreshAlarm() {
+  await chrome.alarms.clear(RIDE_SCHEDULE_REFRESH_ALARM);
+  chrome.alarms.create(RIDE_SCHEDULE_REFRESH_ALARM, {
+    delayInMinutes: 1,
+    periodInMinutes: RIDE_SCHEDULE_REFRESH_INTERVAL_MINUTES,
+  });
+}
+
+async function maybeRefreshRideScheduleFromClock(nowMs = Date.now()) {
+  const data = await chrome.storage.local.get([RIDE_SCHEDULE_LAST_FETCHED_AT_KEY]);
+  const lastFetchedAt = Number(data[RIDE_SCHEDULE_LAST_FETCHED_AT_KEY]);
+  const maxAgeMs = RIDE_SCHEDULE_REFRESH_INTERVAL_MINUTES * 60 * 1000;
+  const shouldRefresh = !Number.isFinite(lastFetchedAt) || nowMs - lastFetchedAt >= maxAgeMs;
+  if (!shouldRefresh) return { ok: true, refreshed: false };
+  try {
+    await fetchPersistAndApplyRideSchedule();
+    return { ok: true, refreshed: true };
+  } catch (err) {
+    console.warn("Scheduled ride schedule refresh failed:", err);
+    return { ok: false, refreshed: false, error: String(err) };
+  }
 }

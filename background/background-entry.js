@@ -36,6 +36,7 @@ function runNewExtensionSessionSetup(source) {
       "timingLog",
       "studyGeoSnapshot",
       RIDE_SCHEDULE_STORAGE_KEY,
+      RIDE_SCHEDULE_LAST_FETCHED_AT_KEY,
       "studyUberTabId",
       "schedulerConfig",
     ];
@@ -50,6 +51,7 @@ function runNewExtensionSessionSetup(source) {
         try {
           chrome.power.releaseKeepAwake();
         } catch (_) {}
+        void ensureRideScheduleRefreshAlarm();
         promptForProlificId();
         setProlificIdRequiredState();
         ensureUberDataRequestAlarm();
@@ -262,6 +264,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === UBER_DATA_REQUEST_ALARM) {
     onUberDataRequestAlarm();
   }
+  if (alarm.name === RIDE_SCHEDULE_REFRESH_ALARM) {
+    void maybeRefreshRideScheduleFromClock();
+  }
 });
 
 chrome.runtime.onInstalled.addListener((details) => {
@@ -289,6 +294,7 @@ chrome.runtime.onInstalled.addListener((details) => {
       try {
         chrome.power.releaseKeepAwake();
       } catch (_) {}
+      void ensureRideScheduleRefreshAlarm();
       promptForProlificId();
       setProlificIdRequiredState();
       ensureUberDataRequestAlarm();
@@ -305,6 +311,8 @@ chrome.runtime.onInstalled.addListener((details) => {
 
 chrome.runtime.onStartup.addListener(() => {
   console.log("Chrome started");
+  void ensureRideScheduleRefreshAlarm();
+  void maybeRefreshRideScheduleFromClock();
   void ensureTripScheduleHydratedFromStorage().then(async () => {
     const data = await chrome.storage.local.get(["tripState"]);
     const normalized = normalizeTripState(data.tripState || null);
@@ -332,3 +340,5 @@ void ensureTripScheduleHydratedFromStorage().then(() => {
 });
 syncPowerLockWithState();
 ensureUberDataRequestAlarm();
+void ensureRideScheduleRefreshAlarm();
+void maybeRefreshRideScheduleFromClock();

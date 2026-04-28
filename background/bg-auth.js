@@ -349,7 +349,18 @@ async function runCheckUberLogin() {
       } else if (workingState.running) {
         await scheduleNextSlot(workingState);
       } else {
-        // Verified + logged in, but idle state exists (e.g. setup state). Start scheduler now.
+        // Verified + logged in, but idle state exists (e.g. setup state).
+        // If the day is already over, preserve completed statuses instead of resetting them.
+        const now = Date.now();
+        const nextSlot = getNextTripIndex(now);
+        if (nextSlot >= TOTAL_SLOTS) {
+          workingState.running = false;
+          workingState.loginRequired = false;
+          await chrome.storage.local.set({ tripState: workingState });
+          await updateBadge(workingState);
+          return;
+        }
+        // Otherwise start scheduler now.
         if (!tripHistoryVerification.passed) {
           return;
         }

@@ -12,7 +12,7 @@ function getTripTimestamp(tripIndex) {
 
 function getNextTripIndex(now) {
   for (let i = 0; i < TRIPS.length; i++) {
-    if (getTripTimestamp(i) > now) return i;
+    if (getTripTimestamp(i) >= now) return i;
   }
   return TRIPS.length;
 }
