@@ -713,8 +713,41 @@ async function repairOrphanSearchingTripStatuses(state) {
   }
 }
 
+/**
+ * Heal stale terminal states from previous study windows so users are not stuck in
+ * "not logged in" after the schedule has already ended.
+ */
+function normalizeTripState(state, now = Date.now()) {
+  if (!state || typeof state !== "object") return { state, changed: false };
+  let changed = false;
+  const endTime = Number(state.endTime);
+  const isExpired = Number.isFinite(endTime) && now >= endTime;
+  if (!isExpired) return { state, changed };
+
+  if (state.running) {
+    state.running = false;
+    changed = true;
+  }
+  if (state.loginRequired) {
+    state.loginRequired = false;
+    changed = true;
+  }
+  if (Array.isArray(state.tripStatuses)) {
+    for (let i = 0; i < state.tripStatuses.length; i++) {
+      const status = state.tripStatuses[i];
+      if (status === "pending" || status === "searching") {
+        state.tripStatuses[i] = "skipped";
+        changed = true;
+      }
+    }
+  }
+
+  return { state, changed };
+}
+
 async function markDayComplete(state) {
   state.running = false;
+  state.loginRequired = false;
   for (let i = 0; i < TOTAL_SLOTS; i++) {
     if (state.tripStatuses[i] === "pending" || state.tripStatuses[i] === "searching") {
       state.tripStatuses[i] = "skipped";

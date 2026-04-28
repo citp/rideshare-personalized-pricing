@@ -71,3 +71,12 @@ async function hydrateTripScheduleIfStored() {
     console.warn("hydrateTripScheduleIfStored:", err);
   }
 }
+
+/** One in-flight hydrate per worker so GET_TRIP_SCHEDULE cannot run before TRIPS is loaded from storage. */
+let _ensureTripScheduleHydratedPromise = null;
+function ensureTripScheduleHydratedFromStorage() {
+  if (!_ensureTripScheduleHydratedPromise) {
+    _ensureTripScheduleHydratedPromise = hydrateTripScheduleIfStored();
+  }
+  return _ensureTripScheduleHydratedPromise;
+}

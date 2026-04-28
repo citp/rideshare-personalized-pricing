@@ -1,66 +1,43 @@
-const TOOLBAR_ICON_GOOD = "Icon.png";
-const TOOLBAR_ICON_BAD = "IconBadState.png";
 const TIMING_LOG_KEY_FOR_ICON = "timingLog";
 
-/** Avoid redundant setIcon IPC when path unchanged (popup polls often). */
-let _lastToolbarIconPathSet = null;
+/** Popup GET_STATE must not hit storage+badge every 2s — backs up extension IPC and freezes Chrome. */
+let _lastThrottledActionSyncFromGetStateAt = 0;
 
-/** Serialize setIcon: concurrent refresh + GET_STATE throttling could finish out of order and leave the wrong icon. */
-let _toolbarIconRefreshChain = Promise.resolve();
-
-/** Popup GET_STATE must not await setIcon every 2s — backs up extension IPC and freezes Chrome. */
-let _lastThrottledToolbarIconAt = 0;
-
-function toolbarIconPathFromTimingLog(rows, installedAtMs) {
+/** Check if sample exists and search health is failing. */
+async function timingIndicatesBadSearchHealth() {
+  const data = await chrome.storage.local.get([TIMING_LOG_KEY_FOR_ICON, EXTENSION_INSTALLED_AT_KEY]);
+  const rows = Array.isArray(data[TIMING_LOG_KEY_FOR_ICON]) ? data[TIMING_LOG_KEY_FOR_ICON] : [];
+  const raw = data[EXTENSION_INSTALLED_AT_KEY];
+  const installedAtMs = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
   const filtered = filterTimingLogRowsAfterInstall(rows, installedAtMs);
   const health = buildSearchHealth(filtered);
-  if (health.sampleSize === 0) return TOOLBAR_ICON_GOOD;
-  return health.isFailing ? TOOLBAR_ICON_BAD : TOOLBAR_ICON_GOOD;
+  if (health.sampleSize === 0) return false;
+  return health.isFailing;
 }
 
-async function refreshToolbarIconOnce() {
-  try {
-    const data = await chrome.storage.local.get([TIMING_LOG_KEY_FOR_ICON, EXTENSION_INSTALLED_AT_KEY]);
-    const rows = Array.isArray(data[TIMING_LOG_KEY_FOR_ICON]) ? data[TIMING_LOG_KEY_FOR_ICON] : [];
-    const raw = data[EXTENSION_INSTALLED_AT_KEY];
-    const installedAtMs = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
-    const path = toolbarIconPathFromTimingLog(rows, installedAtMs);
-    if (path === _lastToolbarIconPathSet) return;
-    await chrome.action.setIcon({ path: { 16: path, 32: path } });
-    _lastToolbarIconPathSet = path;
-  } catch (err) {
-    console.warn("refreshToolbarIcon:", err);
-  }
-}
-
-function refreshToolbarIconThrottled(minIntervalMs) {
+function updateBadgeThrottledFromStorage(minIntervalMs) {
   const now = Date.now();
-  if (now - _lastThrottledToolbarIconAt < minIntervalMs) return;
-  _lastThrottledToolbarIconAt = now;
-  void refreshToolbarIcon();
+  if (now - _lastThrottledActionSyncFromGetStateAt < minIntervalMs) return;
+  _lastThrottledActionSyncFromGetStateAt = now;
+  void chrome.storage.local.get(["tripState"], (data) => {
+    void updateBadge(data.tripState || null);
+  });
 }
 
-function refreshToolbarIcon() {
-  const mine = _toolbarIconRefreshChain.then(() => refreshToolbarIconOnce());
-  _toolbarIconRefreshChain = mine.catch(() => {});
-  return mine;
+async function syncActionFromStorage() {
+  const data = await chrome.storage.local.get(["tripState"]);
+  await updateBadge(data.tripState || null);
 }
 
 async function updateBadge(state) {
-  if (!state) {
-    chrome.action.setBadgeText({ text: "" });
-    await refreshToolbarIcon();
-    return;
-  }
-  if (state.loginRequired) {
+  const badTiming = await timingIndicatesBadSearchHealth();
+  const showRedBang = Boolean(state?.loginRequired) || badTiming;
+  if (showRedBang) {
     chrome.action.setBadgeText({ text: "!" });
     chrome.action.setBadgeBackgroundColor({ color: "#c53030" });
   } else {
     chrome.action.setBadgeText({ text: "" });
   }
-  // Must await: MV3 service workers can terminate before a fire-and-forget promise finishes,
-  // so chrome.action.setIcon would never run.
-  await refreshToolbarIcon();
 }
 
 function sendLoginNotification() {

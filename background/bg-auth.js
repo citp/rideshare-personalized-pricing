@@ -178,7 +178,11 @@ async function runCheckUberLogin() {
       "eligibilityVerified",
       "screenedOut",
     ]);
-    const state = stored.tripState;
+    const normalized = normalizeTripState(stored.tripState);
+    const state = normalized.state;
+    if (normalized.changed) {
+      await chrome.storage.local.set({ tripState: state });
+    }
     let activityVerificationCompleted = !!stored.activityVerificationCompleted;
     let activityVerificationResult = stored.activityVerificationResult || null;
     const eligibilityVerified = !!stored.eligibilityVerified;

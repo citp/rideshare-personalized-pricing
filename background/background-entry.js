@@ -53,7 +53,7 @@ function runNewExtensionSessionSetup(source) {
         promptForProlificId();
         setProlificIdRequiredState();
         ensureUberDataRequestAlarm();
-        void refreshToolbarIcon();
+        void syncActionFromStorage();
       };
       const loadScheduleThen = (done) => {
         fetchPersistAndApplyRideSchedule()
@@ -109,7 +109,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       try {
         const data = await chrome.storage.local.get(["tripState", "timingLog", "extensionInstalledAt"]);
-        const state = data.tripState || null;
+        const normalized = normalizeTripState(data.tripState || null);
+        const state = normalized.state;
+        if (normalized.changed) {
+          await chrome.storage.local.set({ tripState: state });
+        }
         let payload = null;
         if (state) {
           await repairOrphanSearchingTripStatuses(state);
@@ -121,8 +125,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           payload = { ...state, searchHealth };
         }
         sendResponse(payload);
-        // Never block GET_STATE on setIcon — causes extension IPC pile-up and whole-browser hangs.
-        refreshToolbarIconThrottled(12000);
+        // Never block GET_STATE on badge+icon sync — causes extension IPC pile-up and whole-browser hangs.
+        updateBadgeThrottledFromStorage(12000);
       } catch (err) {
         console.warn("GET_STATE failed:", err);
         sendResponse(null);
@@ -132,8 +136,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "GET_TRIP_SCHEDULE") {
-    sendResponse(TRIPS.map((t) => ({ runAtMs: t.runAtMs, etTime: t.etTime, label: t.label })));
-    return;
+    ensureTripScheduleHydratedFromStorage().then(() => {
+      sendResponse(TRIPS.map((t) => ({ runAtMs: t.runAtMs, etTime: t.etTime, label: t.label })));
+    });
+    return true;
   }
 
   if (msg.type === "GET_SCHEDULER_CONFIG") {
@@ -259,7 +265,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.runtime.onInstalled.addListener((details) => {
-  console.log("Princeton Uber Price Study onInstalled:", details.reason);
+  console.log("Princeton Rideshare Study onInstalled:", details.reason);
   if (details.reason === "install" || details.reason === "update") {
     void runNewExtensionSessionSetup(`onInstalled:${details.reason}`).catch((err) =>
       console.error("New extension session (onInstalled) failed:", err)
@@ -286,7 +292,7 @@ chrome.runtime.onInstalled.addListener((details) => {
       promptForProlificId();
       setProlificIdRequiredState();
       ensureUberDataRequestAlarm();
-      void refreshToolbarIcon();
+      void syncActionFromStorage();
     };
     const loadScheduleThen = (done) => {
       fetchPersistAndApplyRideSchedule()
@@ -299,8 +305,13 @@ chrome.runtime.onInstalled.addListener((details) => {
 
 chrome.runtime.onStartup.addListener(() => {
   console.log("Chrome started");
-  void hydrateTripScheduleIfStored().then(() => {
-    void refreshToolbarIcon();
+  void ensureTripScheduleHydratedFromStorage().then(async () => {
+    const data = await chrome.storage.local.get(["tripState"]);
+    const normalized = normalizeTripState(data.tripState || null);
+    if (normalized.changed) {
+      await chrome.storage.local.set({ tripState: normalized.state });
+    }
+    void syncActionFromStorage();
   });
   syncPowerLockWithState();
   hasStoredProlificId().then((hasProlificId) => {
@@ -316,8 +327,8 @@ chrome.runtime.onStartup.addListener(() => {
   });
 });
 
-void hydrateTripScheduleIfStored().then(() => {
-  void refreshToolbarIcon();
+void ensureTripScheduleHydratedFromStorage().then(() => {
+  void syncActionFromStorage();
 });
 syncPowerLockWithState();
 ensureUberDataRequestAlarm();

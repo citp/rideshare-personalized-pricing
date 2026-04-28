@@ -220,7 +220,7 @@ document.addEventListener("DOMContentLoaded", () => {
         statusDiv.textContent =
           `⚠ Screened out (${screenOutReason || "verification_failed"}).\n\n` +
           `Please remove this extension: open chrome://extensions in the address bar, ` +
-          `find "Princeton Uber Price Study", then click Remove.`;
+          `find "Princeton Rideshare Study", then click Remove.`;
         statusDiv.className = "login-warning";
         if (existingBtn) existingBtn.remove();
       } else if (prolificIdRequired) {
@@ -507,8 +507,15 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // Trigger immediate login check
-  chrome.runtime.sendMessage({ type: "CHECK_LOGIN_NOW" });
+  // Trigger immediate login check. If service worker is cold/restarting, retry once.
+  function triggerLoginCheck(retried = false) {
+    chrome.runtime.sendMessage({ type: "CHECK_LOGIN_NOW" }, () => {
+      if (chrome.runtime.lastError && !retried) {
+        setTimeout(() => triggerLoginCheck(true), 1000);
+      }
+    });
+  }
+  triggerLoginCheck();
 
   // Initial render + auto-refresh
   refreshUI();
