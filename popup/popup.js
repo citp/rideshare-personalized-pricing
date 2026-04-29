@@ -56,7 +56,6 @@ document.addEventListener("DOMContentLoaded", () => {
     TRIP_SCHEDULE = schedule;
     refreshUI(); // re-render now that we have the schedule
   });
-  const downloadBtn = document.getElementById("download-btn");
   const statusDiv = document.getElementById("status");
   const tripListDiv = document.getElementById("trip-list");
   const failureAlertDiv = document.getElementById("failure-alert");
@@ -80,16 +79,12 @@ document.addEventListener("DOMContentLoaded", () => {
       if (chrome.runtime.lastError || !state) {
         statusDiv.textContent = "Waiting for searches to begin…";
         statusDiv.className = "";
-        downloadBtn.disabled = true;
-        downloadBtn.textContent = "Download CSV";
         tripListDiv.innerHTML = "";
         return;
       }
 
       const {
         running,
-        totalSlots,
-        results,
         loginRequired,
         tripStatuses,
         prolificIdRequired,
@@ -101,7 +96,6 @@ document.addEventListener("DOMContentLoaded", () => {
         tripHistoryVerification,
         searchHealth,
       } = state;
-      const hasResults = results && results.length > 0;
       const successCount = (tripStatuses || []).filter(s => s === "success").length;
       const errorCount = (tripStatuses || []).filter(s => s === "no_data" || s === "no_prices").length;
       const missedLateCount = (tripStatuses || []).filter(s => s === "missed_late").length;
@@ -109,15 +103,6 @@ document.addEventListener("DOMContentLoaded", () => {
       const pendingCount = (tripStatuses || []).filter(s => s === "pending").length;
       const searchingCount = (tripStatuses || []).filter(s => s === "searching").length;
       const isDone = !running && !loginRequired && pendingCount === 0;
-      const hasVerificationResult =
-        !!profileVerification ||
-        !!tripHistoryVerification ||
-        !!profileVerificationFailed ||
-        !!tripHistoryVerificationFailed;
-      const verificationInProgress =
-        !prolificIdRequired &&
-        !screenedOut &&
-        !hasVerificationResult;
       const verificationCompleted =
         !prolificIdRequired &&
         !screenedOut &&
@@ -299,9 +284,6 @@ document.addEventListener("DOMContentLoaded", () => {
         statusDiv.className = "";
       }
 
-      downloadBtn.disabled = !hasResults;
-      downloadBtn.textContent = isDone ? "Download CSV" : "Download CSV (partial)";
-
       const shouldPollFast =
         running ||
         loginRequired ||
@@ -439,7 +421,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // ── Download CSV ──
   function getCsvHeaders(rows) {
     if (!Array.isArray(rows) || rows.length === 0) return [];
     const headers = [];
@@ -451,41 +432,10 @@ document.addEventListener("DOMContentLoaded", () => {
     return headers;
   }
 
-  downloadBtn.addEventListener("click", () => {
-    chrome.runtime.sendMessage({ type: "GET_STATE" }, (state) => {
-      if (!state || !state.results || state.results.length === 0) {
-        statusDiv.textContent = "No results to download.";
-        return;
-      }
-
-      const rows = state.results;
-      const headers = getCsvHeaders(rows);
-      const csvLines = [headers.join(",")];
-
-      for (const row of rows) {
-        const values = headers.map((h) => {
-          let v = row[h] ?? "";
-          v = String(v).replace(/"/g, '""');
-          if (/[,"\n]/.test(v)) v = `"${v}"`;
-          return v;
-        });
-        csvLines.push(values.join(","));
-      }
-
-      const csv = csvLines.join("\n");
-      const blob = new Blob([csv], { type: "text/csv" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `uber_prices_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
-    });
-  });
-
-  function downloadCsv(rows, filenamePrefix) {
+  function downloadTimingLogCsv(rows) {
     if (!rows || rows.length === 0) {
-      statusDiv.textContent = "No data to download.";
+      statusDiv.textContent = "No timing log rows to export.";
+      statusDiv.className = "login-warning";
       return;
     }
     const headers = getCsvHeaders(rows);
@@ -504,7 +454,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${filenamePrefix}_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.csv`;
+    a.download = `uber_timing_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -517,7 +467,7 @@ document.addEventListener("DOMContentLoaded", () => {
         statusDiv.className = "login-warning";
         return;
       }
-      downloadCsv(resp.rows, "uber_timing");
+      downloadTimingLogCsv(resp.rows);
     });
   });
 

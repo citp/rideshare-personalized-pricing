@@ -323,7 +323,7 @@ async function runCheckUberLogin() {
         }
         const now = Date.now();
         if (now >= workingState.endTime) {
-          markDayComplete(workingState);
+          await markDayComplete(workingState);
           return;
         }
         const nextSlot = getNextTripIndex(now);

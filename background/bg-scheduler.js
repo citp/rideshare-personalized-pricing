@@ -684,7 +684,7 @@ async function startSearch() {
   await updateBadge(state);
 
   if (nextSlot >= TOTAL_SLOTS) {
-    markDayComplete(state);
+    await markDayComplete(state);
   } else {
     const cfg = await getSchedulerConfig();
     await scheduleSlotAlarms(nextSlot, cfg);
@@ -827,13 +827,13 @@ async function onSlotAlarm(alarmName = ALARM_NAME) {
     }
 
     if (Date.now() >= state.endTime) {
-      markDayComplete(state);
+      await markDayComplete(state);
       return;
     }
 
     const nextSlot = state.currentSlot + 1;
     if (nextSlot >= TOTAL_SLOTS) {
-      markDayComplete(state);
+      await markDayComplete(state);
       return;
     }
 
@@ -979,7 +979,9 @@ async function markDayComplete(state) {
   const errorCount = state.tripStatuses.filter((s) => s === "no_data" || s === "no_prices").length;
   const skippedCount = state.tripStatuses.filter((s) => s === "skipped").length;
   const missedLateCount = state.tripStatuses.filter((s) => s === "missed_late").length;
-  console.log(`✅ Day complete: ${successCount} succeeded, ${errorCount} errors, ${missedLateCount} missed late, ${skippedCount} skipped, ${state.results.length} CSV rows`);
+  console.log(
+    `✅ Day complete: ${successCount} succeeded, ${errorCount} errors, ${missedLateCount} missed late, ${skippedCount} skipped, ${state.results.length} result rows`
+  );
 }
 
 async function runTrip(state) {
