@@ -102,6 +102,37 @@ function tokenizeProductWords(text) {
   return t ? t.split(/\s+/).filter(Boolean) : [];
 }
 
+/**
+ * Tokens from primary CTAs on product-selection (e.g. "Request Car Seat") must never match product
+ * names by substring (e.g. "car seat" inside "request car seat").
+ */
+function tokenLooksLikePrimaryRequestCta(token) {
+  if (!token || typeof token !== "string") return false;
+  const t = token.trim().toLowerCase();
+  if (/^request\b/.test(t)) return true;
+  if (/^book\b.*\b(ride|trip)\b/.test(t)) return true;
+  if (/^confirm\b/.test(t)) return true;
+  if (/^order\b/.test(t)) return true;
+  return false;
+}
+
+/** True for the bottom (or any) primary ride-booking control — never click programmatically. */
+function elementLooksLikePrimaryRideRequestCta(el) {
+  if (!el || typeof el.getBoundingClientRect !== "function") return false;
+  const tag = (el.tagName || "").toLowerCase();
+  const role = (el.getAttribute("role") || "").toLowerCase();
+  const actionable = tag === "button" || tag === "a" || role === "button";
+  const aria = normalizeText(el.getAttribute("aria-label") || "").toLowerCase();
+  const tip = normalizeText(el.textContent || "").slice(0, 200).toLowerCase();
+  const label = `${aria} ${tip}`.trim();
+  if (!label) return false;
+  if (/^request\s/.test(label)) return actionable || tag === "div";
+  if (/^book\s/.test(label) && /\b(ride|trip)\b/.test(label)) return actionable;
+  if (/^confirm\s/.test(label)) return actionable;
+  if (/\b(visa|mastercard|amex)\b.*•/.test(label) && /\brequest\b/.test(label)) return actionable;
+  return false;
+}
+
 function parseBreakdownFromOpenDialog() {
   const dialogs = collectElementsDeep('[role="dialog"], [aria-modal="true"]');
   let modal = dialogs.find((el) => /price breakdown/i.test(normalizeText(el.textContent || "")));
@@ -272,8 +303,9 @@ function findClickableProductCard(productName) {
     const txt = normalizeText(el.textContent || "");
     if (!txt) continue;
     const token = normalizeProductToken(txt);
-    if (!token || !token.includes(desired)) continue;
+    if (!token || tokenLooksLikePrimaryRequestCta(token) || !token.includes(desired)) continue;
     const clickable = resolveClickableAncestor(el) || el;
+    if (elementLooksLikePrimaryRideRequestCta(clickable)) continue;
     const rect = clickable.getBoundingClientRect();
     if (rect.width < 20 || rect.height < 20) continue;
     const score =
@@ -300,7 +332,8 @@ function resolveProductClickTargets(productNames) {
     const txt = normalizeText(el.textContent || "");
     if (!txt) continue;
     const token = normalizeProductToken(txt);
-    if (!token) continue;
+    if (!token || tokenLooksLikePrimaryRequestCta(token)) continue;
+    if (elementLooksLikePrimaryRideRequestCta(el)) continue;
     const rect = el.getBoundingClientRect();
     if (rect.width < 20 || rect.height < 20) continue;
     cards.push({ el, token, area: rect.width * rect.height, top: rect.top, left: rect.left });
@@ -315,6 +348,7 @@ function resolveProductClickTargets(productNames) {
     for (let i = 0; i < cards.length; i++) {
       if (used.has(i)) continue;
       const c = cards[i];
+      if (tokenLooksLikePrimaryRequestCta(c.token)) continue;
       if (!c.token.includes(w.token) && !w.token.includes(c.token)) continue;
       const score =
         (c.token === w.token ? 4000 : 0) +
@@ -350,6 +384,7 @@ function getOpenTargetsFromRow(rowEl) {
   const candidates = Array.from(rowEl.querySelectorAll("button,[role='button'],a,[tabindex]"));
   const scored = [];
   for (const el of candidates) {
+    if (elementLooksLikePrimaryRideRequestCta(el)) continue;
     const rect = el.getBoundingClientRect();
     if (rect.width < 8 || rect.height < 8) continue;
     const role = (el.getAttribute("role") || "").toLowerCase();
@@ -368,7 +403,22 @@ function sleep(ms) {
 }
 
 async function captureProductBreakdown(productName, perProductTimeoutMs, preferredClickable = null) {
+  const captureWindowStartEvents = _graphqlEvents.length;
+  const graphqlSinceCaptureStart = () => Math.max(0, _graphqlEvents.length - captureWindowStartEvents);
+
   const attemptClickAndWait = async () => {
+    let detailClickDispatchCount = 0;
+    const rowOpenClick = (el) => {
+      if (!el || elementLooksLikePrimaryRideRequestCta(el)) return false;
+      try {
+        el.click();
+        detailClickDispatchCount += 1;
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+
     const hasPreferred =
       preferredClickable &&
       preferredClickable.isConnected &&
@@ -382,6 +432,9 @@ async function captureProductBreakdown(productName, perProductTimeoutMs, preferr
           breakdownCaptureError: "product_card_missing",
           detailClickAttempted: true,
           detailClickMatchedNode: "",
+          detailGraphqlEventsSeenAfterClick: graphqlSinceCaptureStart(),
+          detailClickDispatchCount: 0,
+          detailProductWasPreselected: false,
         },
       };
     }
@@ -406,6 +459,7 @@ async function captureProductBreakdown(productName, perProductTimeoutMs, preferr
               detailClickAttempted: true,
               detailClickMatchedNode: matchedNode,
               detailGraphqlEventsSeenAfterClick: Math.max(0, _graphqlEvents.length - eventsBeforeClick),
+              detailClickDispatchCount,
               detailProductWasPreselected: wasPreselected,
             },
           };
@@ -434,6 +488,7 @@ async function captureProductBreakdown(productName, perProductTimeoutMs, preferr
                 detailClickAttempted: true,
                 detailClickMatchedNode: matchedNode,
                 detailGraphqlEventsSeenAfterClick: Math.max(0, _graphqlEvents.length - eventsBeforeClick),
+                detailClickDispatchCount,
                 detailProductWasPreselected: wasPreselected,
               },
             };
@@ -464,6 +519,7 @@ async function captureProductBreakdown(productName, perProductTimeoutMs, preferr
             detailClickAttempted: true,
             detailClickMatchedNode: matchedNode,
             detailGraphqlEventsSeenAfterClick: Math.max(0, _graphqlEvents.length - eventsBeforeClick),
+            detailClickDispatchCount,
             detailProductWasPreselected: wasPreselected,
           },
         };
@@ -473,7 +529,7 @@ async function captureProductBreakdown(productName, perProductTimeoutMs, preferr
 
     // Step 1: select the row.
     await sleep(120);
-    clickable.click();
+    rowOpenClick(clickable);
     const firstPass = await pollForBreakdown(Math.min(1800, Math.floor(perProductTimeoutMs * 0.3)));
     if (firstPass.done) return firstPass;
 
@@ -486,15 +542,11 @@ async function captureProductBreakdown(productName, perProductTimeoutMs, preferr
     } catch (_) {}
     const openTargets = getOpenTargetsFromRow(clickable).slice(0, 4);
     for (const target of openTargets) {
-      try {
-        target.click();
-      } catch (_) {
-        continue;
-      }
+      if (!rowOpenClick(target)) continue;
       const secondPass = await pollForBreakdown(Math.min(2600, perProductTimeoutMs));
       if (secondPass.done) return secondPass;
       // If no signal yet, re-select row before trying the next target.
-      clickable.click();
+      rowOpenClick(clickable);
       await sleep(120);
     }
 
@@ -510,6 +562,7 @@ async function captureProductBreakdown(productName, perProductTimeoutMs, preferr
             detailClickAttempted: true,
             detailClickMatchedNode: matchedNode,
             detailGraphqlEventsSeenAfterClick: Math.max(0, _graphqlEvents.length - eventsBeforeClick),
+            detailClickDispatchCount,
             detailProductWasPreselected: wasPreselected,
           },
         };
@@ -538,6 +591,7 @@ async function captureProductBreakdown(productName, perProductTimeoutMs, preferr
               detailClickAttempted: true,
               detailClickMatchedNode: matchedNode,
               detailGraphqlEventsSeenAfterClick: Math.max(0, _graphqlEvents.length - eventsBeforeClick),
+              detailClickDispatchCount,
               detailProductWasPreselected: wasPreselected,
             },
           };
@@ -549,7 +603,7 @@ async function captureProductBreakdown(productName, perProductTimeoutMs, preferr
     if (eventsSeen === 0) {
       // Targeted recovery: when no post-click events were seen at all, retry open flow once more.
       try {
-        clickable.click();
+        rowOpenClick(clickable);
         await sleep(180);
         clickable.focus?.();
         clickable.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
@@ -557,31 +611,34 @@ async function captureProductBreakdown(productName, perProductTimeoutMs, preferr
       } catch (_) {}
       const openTargets = getOpenTargetsFromRow(clickable).slice(0, 3);
       for (const target of openTargets) {
-        try {
-          target.click();
-        } catch (_) {
-          continue;
-        }
+        if (!rowOpenClick(target)) continue;
         const recovery = await pollForBreakdown(1800);
         if (recovery.done) return recovery;
       }
     }
-    return { done: false };
+    return {
+      done: false,
+      dispatchCount: detailClickDispatchCount,
+      graphqlDelta: Math.max(0, _graphqlEvents.length - eventsBeforeClick),
+    };
   };
 
   const first = await attemptClickAndWait();
   if (first.done) return first.result;
+  let timeoutClickDispatches = first.dispatchCount ?? 0;
   // Retry once in case first click did not open the sheet.
   await sleep(220);
   const second = await attemptClickAndWait();
   if (second.done) return second.result;
+  timeoutClickDispatches += second.dispatchCount ?? 0;
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   return {
     breakdownCaptureStatus: "timeout",
     breakdownCaptureError: "breakdown_dialog_timeout",
     detailClickAttempted: true,
     detailClickMatchedNode: "",
-    detailGraphqlEventsSeenAfterClick: 0,
+    detailGraphqlEventsSeenAfterClick: graphqlSinceCaptureStart(),
+    detailClickDispatchCount: timeoutClickDispatches,
     detailProductWasPreselected: false,
   };
 }

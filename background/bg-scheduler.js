@@ -1054,6 +1054,7 @@ function applyDetailBreakdownToRow(row, detail) {
   row.detailGraphqlEventsSeenAfterClick =
     detail.detailGraphqlEventsSeenAfterClick ?? row.detailGraphqlEventsSeenAfterClick ?? "";
   row.detailProductWasPreselected = detail.detailProductWasPreselected ?? row.detailProductWasPreselected ?? "";
+  row.detailClickDispatchCount = detail.detailClickDispatchCount ?? row.detailClickDispatchCount ?? "";
 }
 
 async function tryCaptureDetailedBreakdowns(slotRowsForUpload) {
@@ -1189,6 +1190,7 @@ async function handleProductsCapture(productsData) {
             detailClickMatchedNode: "",
             detailGraphqlEventsSeenAfterClick: "",
             detailProductWasPreselected: "",
+            detailClickDispatchCount: "",
           };
           state.results.push(capturedRow);
           slotRowsForUpload.push(capturedRow);
