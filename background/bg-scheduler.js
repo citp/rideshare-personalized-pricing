@@ -42,6 +42,60 @@ const CAPTURE_TIMEOUT_ALARM_PREFIX = `${ALARM_NAME}:capture-timeout:slot:`;
 const PREWARM_OFFSETS_MS = [5 * 60 * 1000, 3 * 60 * 1000, 90 * 1000, 30 * 1000];
 const STUDY_UBER_TAB_ID_KEY = "studyUberTabId";
 const DETAIL_CAPTURE_TIMEOUT_MS = 30000;
+
+/**
+ * Only these GraphQL `displayName` / row `productName` values may receive programmatic DOM clicks
+ * for fare breakdown. Others keep upfront fare from GraphQL only (`skipped_allowlist`).
+ * Union from study exports under `yaelle_data/` — extend when new products appear.
+ */
+const DETAIL_CAPTURE_PRODUCT_ALLOWLIST = [
+  "Assist",
+  "Black",
+  "Black SUV",
+  "Black VIP",
+  "Car Seat",
+  "Comfort",
+  "Comfort Electric",
+  "Courier",
+  "Courier Bike",
+  "Courier Saver",
+  "Courier Saver Bike",
+  "Courier Super Saver",
+  "Electric",
+  "Pet",
+  "Premier",
+  "Premier SUV",
+  "Share",
+  "Shuttle",
+  "Taxi",
+  "Taxi WAV",
+  "Uber Pet",
+  "UberX",
+  "UberX VIP",
+  "UberXL",
+  "UberXL Priority",
+  "UberXXL",
+  "VIP",
+  "WAV",
+];
+
+const _detailAllowNorm = new Set(DETAIL_CAPTURE_PRODUCT_ALLOWLIST.map((s) => s.trim().toLowerCase()));
+
+function isProductNameAllowedForDetailCapture(name) {
+  if (typeof name !== "string" || !name.trim()) return false;
+  return _detailAllowNorm.has(name.trim().toLowerCase());
+}
+
+function applyDetailSkippedNotOnAllowlist(row) {
+  if (!row) return;
+  row.breakdownCaptureStatus = "skipped_allowlist";
+  row.breakdownCaptureError = "";
+  row.detailClickAttempted = false;
+  row.detailClickMatchedNode = "";
+  row.detailGraphqlEventsSeenAfterClick = "";
+  row.detailProductWasPreselected = "";
+  row.detailClickDispatchCount = "";
+}
 /** Install-time snapshot on study site; used only when trip-time Uber geolocation is unavailable. */
 const STUDY_GEO_SNAPSHOT_KEY = "studyGeoSnapshot";
 
@@ -1062,15 +1116,23 @@ async function tryCaptureDetailedBreakdowns(slotRowsForUpload) {
     return { ok: false, reason: "no_rows" };
   }
 
+  for (const row of slotRowsForUpload) {
+    const key = typeof row?.productName === "string" ? row.productName.trim() : "";
+    if (key && !isProductNameAllowedForDetailCapture(key)) {
+      applyDetailSkippedNotOnAllowlist(row);
+    }
+  }
+
   const productNames = Array.from(
     new Set(
       slotRowsForUpload
         .map((r) => (typeof r?.productName === "string" ? r.productName.trim() : ""))
         .filter(Boolean)
+        .filter(isProductNameAllowedForDetailCapture)
     )
   );
   if (productNames.length === 0) {
-    return { ok: false, reason: "no_product_names" };
+    return { ok: true, failedProducts: [] };
   }
 
   try {
@@ -1090,10 +1152,11 @@ async function tryCaptureDetailedBreakdowns(slotRowsForUpload) {
 
     for (const row of slotRowsForUpload) {
       const key = typeof row.productName === "string" ? row.productName.trim() : "";
-      const detail = key ? response.breakdowns[key] : null;
+      if (!key || !isProductNameAllowedForDetailCapture(key)) continue;
+      const detail = response.breakdowns[key] || null;
       if (detail) {
         applyDetailBreakdownToRow(row, detail);
-      } else if (!row.breakdownCaptureStatus) {
+      } else if (!row.breakdownCaptureStatus || row.breakdownCaptureStatus === "not_attempted") {
         row.breakdownCaptureStatus = "not_attempted";
       }
     }

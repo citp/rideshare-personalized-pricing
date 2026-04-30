@@ -103,33 +103,75 @@ function tokenizeProductWords(text) {
 }
 
 /**
- * Tokens from primary CTAs on product-selection (e.g. "Request Car Seat") must never match product
- * names by substring (e.g. "car seat" inside "request car seat").
+ * Normalized DOM text that reflects ride booking / checkout / pay intent — not product row labels.
+ * Used so tokens like "request car seat" never match product substring "car seat".
  */
 function tokenLooksLikePrimaryRequestCta(token) {
   if (!token || typeof token !== "string") return false;
   const t = token.trim().toLowerCase();
+  if (!t) return false;
+
   if (/^request\b/.test(t)) return true;
-  if (/^book\b.*\b(ride|trip)\b/.test(t)) return true;
+  if (/^book\b/.test(t) && /\b(ride|trip|it)\b/.test(t)) return true;
   if (/^confirm\b/.test(t)) return true;
   if (/^order\b/.test(t)) return true;
+
+  if (/^schedule\b/.test(t)) return true;
+  if (/^reserve\b/.test(t)) return true;
+  if (t.startsWith("ride now") || /^ride\s+now\b/.test(t)) return true;
+
+  if (/^get\b/.test(t) && /\b(ride|uber|trip|driver|picked)\b/.test(t)) return true;
+  if (/^find\b/.test(t) && /\b(ride|driver|trip|uber)\b/.test(t)) return true;
+  if (/^start\b/.test(t) && /\b(ride|trip|uber)\b/.test(t)) return true;
+  if (/^begin\b/.test(t) && /\b(ride|trip)\b/.test(t)) return true;
+
+  if (/^pay\b/.test(t) && /\b(now|with|using|card|cash)\b/.test(t)) return true;
+  if (/^add\b/.test(t) && /\b(payment|card|paypal)\b/.test(t)) return true;
+  if (/^choose\b/.test(t) && /\b(payment|card)\b/.test(t)) return true;
+  if (/^complete\b/.test(t) && /\b(ride|trip|booking|purchase)\b/.test(t)) return true;
+  if (/^finish\b/.test(t) && /\b(ride|trip|booking)\b/.test(t)) return true;
+
+  if (t.includes("go to checkout") || t.includes("proceed to checkout")) return true;
+  if (/\bcheckout\b/.test(t) && /\b(ride|trip|pay|uber)\b/.test(t)) return true;
+
+  if (/^tip\b/.test(t) && /\b(driver|your)\b/.test(t)) return true;
+  if (/^join\b/.test(t) && /\b(ride|trip)\b/.test(t)) return true;
+
+  if (t.includes("confirm pickup") || t.includes("schedule pickup") || t.includes("schedule ride")) return true;
+  if (t.includes("reserve ride") || t.includes("request pickup")) return true;
+
+  if (/^continue\b/.test(t) && /\b(payment|checkout|book)\b/.test(t)) return true;
+  if (/^next\b/.test(t) && /\b(payment|checkout|step)\b/.test(t)) return true;
+
   return false;
 }
 
-/** True for the bottom (or any) primary ride-booking control — never click programmatically. */
+/** True for primary ride-booking / checkout / pay controls — never click programmatically. */
 function elementLooksLikePrimaryRideRequestCta(el) {
   if (!el || typeof el.getBoundingClientRect !== "function") return false;
   const tag = (el.tagName || "").toLowerCase();
   const role = (el.getAttribute("role") || "").toLowerCase();
   const actionable = tag === "button" || tag === "a" || role === "button";
-  const aria = normalizeText(el.getAttribute("aria-label") || "").toLowerCase();
-  const tip = normalizeText(el.textContent || "").slice(0, 200).toLowerCase();
-  const label = `${aria} ${tip}`.trim();
-  if (!label) return false;
-  if (/^request\s/.test(label)) return actionable || tag === "div";
-  if (/^book\s/.test(label) && /\b(ride|trip)\b/.test(label)) return actionable;
-  if (/^confirm\s/.test(label)) return actionable;
-  if (/\b(visa|mastercard|amex)\b.*•/.test(label) && /\brequest\b/.test(label)) return actionable;
+  const aria = normalizeText(el.getAttribute("aria-label") || "");
+  const tip = normalizeText(el.textContent || "").slice(0, 240);
+  const labelRaw = `${aria} ${tip}`.trim();
+  if (!labelRaw) return false;
+  const label = labelRaw.toLowerCase();
+
+  const norm = normalizeProductToken(labelRaw);
+  if (norm && tokenLooksLikePrimaryRequestCta(norm)) {
+    return actionable || (tag === "div" && /^request\s/.test(label.trim()));
+  }
+
+  if (/^request\s/.test(label.trim())) return actionable || tag === "div";
+  if (/^book\s/.test(label.trim()) && /\b(ride|trip)\b/.test(label)) return actionable;
+  if (/^confirm\s/.test(label.trim())) return actionable;
+  if (/^schedule\s/.test(label.trim()) || /^reserve\s/.test(label.trim())) return actionable;
+  if (/^ride\s+now\b/.test(label.trim()) || label.trim().startsWith("ride now")) return actionable;
+
+  if (/\b(visa|mastercard|amex|discover)\b/i.test(label) && /•|…/.test(labelRaw) && /\brequest\b/i.test(label)) {
+    return actionable;
+  }
   return false;
 }
 
