@@ -12,15 +12,29 @@
       btn.classList.add("is-light");
       btn.title = "Extension is already installed.";
 
-      const p = document.createElement("p");
-      p.id = "extension-installed-msg";
-      p.className = "help has-text-success mt-2";
-      p.setAttribute("role", "status");
-      p.textContent = "Extension installed successfully. Please return to the Qualtrics survey.";
+      const wrap = document.createElement("div");
+      wrap.id = "extension-installed-msg";
+      wrap.className = "notification is-light mt-4 mb-0";
+      wrap.setAttribute("role", "status");
+      wrap.innerHTML = `
+        <div class="icon-text mb-3">
+          <span class="icon has-text-success"><i class="fas fa-circle-check" aria-hidden="true"></i></span>
+          <div>
+            <p class="title is-6 has-text-black mb-1">Extension installed.</p>
+            <p class="is-size-6 has-text-grey-dark mb-2">
+              Verification checks are running in the background.
+              <span class="tag is-info is-light is-rounded ml-1">This may take up to ~5 min</span>
+            </p>
+            <p class="is-size-6 has-text-grey-dark mb-0">
+              If verification succeeds, you will be automatically redirected to complete the Qualtrics survey.
+            </p>
+          </div>
+        </div>
+      `;
 
       const field = btn.closest(".field");
-      if (field) field.appendChild(p);
-      else btn.parentElement.appendChild(p);
+      if (field) field.appendChild(wrap);
+      else btn.parentElement.appendChild(wrap);
     }, 0);
   }
 

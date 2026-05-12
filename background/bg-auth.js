@@ -91,6 +91,25 @@ function handleProlificIdSaved() {
   }, 2500);
 }
 
+async function redirectInstallOrStudyTabToQualtricsSurvey() {
+  try {
+    const data = await chrome.storage.local.get(["prolificId"]);
+    const prolificId = typeof data.prolificId === "string" ? data.prolificId.trim() : "";
+    if (!prolificId) return;
+    const url = buildQualtricsPostEligibilitySurveyUrl(prolificId);
+    const tabs = await chrome.tabs.query({ url: `${STUDY_EXTENSION_PAGES_BASE}/install.html*` });
+    if (tabs.length > 0) {
+      const tab = tabs[0];
+      await chrome.tabs.update(tab.id, { url, active: true });
+      await chrome.windows.update(tab.windowId, { focused: true });
+      return;
+    }
+    await chrome.tabs.create({ url, active: true });
+  } catch (err) {
+    console.warn("Qualtrics redirect after eligibility failed:", err);
+  }
+}
+
 async function promptForProlificId() {
   const promptUrl = getProlificIdPromptUrl();
   const tabs = await chrome.tabs.query({ url: `${STUDY_EXTENSION_PAGES_BASE}/install.html*` });
@@ -296,6 +315,10 @@ async function runCheckUberLogin() {
       eligibilityVerified: nextEligibilityVerified,
       [LAST_LOGIN_CHECK_AT_KEY]: checkStartedAt,
     });
+
+    if (!eligibilityVerified && nextEligibilityVerified) {
+      await redirectInstallOrStudyTabToQualtricsSurvey();
+    }
 
     let workingState = state;
     if (!workingState && hasSession && !tripHistoryVerification.passed) {
